@@ -18,7 +18,7 @@ export default defineConfig({
   },
   envPrefix: ['VITE_', 'TAURI_'],
   build: {
-    outDir: fileURLToPath(new URL('../src-tauri/web', import.meta.url)),
+    outDir: fileURLToPath(new URL('../web', import.meta.url)),
     emptyOutDir: true,
     target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari14',
     minify: !process.env.TAURI_ENV_DEBUG ? 'esbuild' : false,

@@ -15,7 +15,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "build:web": "npm --prefix demo run build",
+    "build:web": "npm --prefix src-tauri/src-web run build",
     "dev": "npx tauri dev",
     "seed": "node scripts/seed-db.mjs",
     "typecheck": "tsc --noEmit"

@@ -67,12 +67,16 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import { storeToRefs } from 'pinia'
 import { ActivityIcon, BarChart2Icon, ListIcon, SettingsIcon } from 'lucide-vue-next'
 import ControlBar   from '@/components/ControlBar.vue'
 import StatsView    from '@/views/StatsView.vue'
 import DetailView   from '@/views/DetailView.vue'
 import ConfigView   from '@/views/ConfigView.vue'
-import { isLive, refreshInterval, series } from '@/composables/useTokenData'
+import { useUsageStore } from '@/stores/usage'
+
+const store = useUsageStore()
+const { isLive, refreshInterval, series } = storeToRefs(store)
 
 const tabs = [
   { id: 'stats',  label: '统计',  icon: BarChart2Icon },

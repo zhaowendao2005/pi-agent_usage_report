@@ -12,6 +12,8 @@
 | `get_series` | `{ start?, end? }` | `TokenDataPoint[]` |
 | `get_models` | `{ start?, end? }` | `ModelUsage[]` |
 | `get_summary` | `{ start?, end? }` | `ServerSummary` |
+| `get_usage_config` | 无 | `UsageUiConfig`（`~/.pi/agent/usage_config.yaml`） |
+| `save_usage_config` | `{ config: UsageUiConfig }` | `void` |
 | `show_main_window` | 无 | 聚焦主窗口 |
 
 ### 时间参数
@@ -21,7 +23,19 @@
 - 数字：epoch 毫秒
 - 字符串：本地时间 `"YYYY-MM-DD HH:mm:ss"`
 
-未传时默认：结束 = 现在，开始 = 现在 − 6 小时。
+未传时默认：结束 = 现在，开始 = 现在 − 24 小时。
+
+### UI 配置（`usage_config.yaml`）
+
+路径：`~/.pi/agent/usage_config.yaml`。首次启动若不存在会写入默认值。
+
+```yaml
+time_preset: "24h"      # today|15m|1h|6h|24h|7d|14d|30d|""(自定义)
+end_is_live: true       # 结束时间跟随当前时刻
+refresh_interval: 30    # 秒
+is_live: true           # 默认开启 LIVE 自动刷新
+# start_time / end_time 仅在自定义区间时写入
+```
 
 前端通过 `window.__TAURI_INTERNALS__` 判断 Tauri 环境，并调用 `invoke()`。
 

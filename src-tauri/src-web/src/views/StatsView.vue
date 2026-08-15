@@ -90,5 +90,8 @@ import TokenPieChart from '@/components/TokenPieChart.vue'
 import ModelBreakdownChart from '@/components/ModelBreakdownChart.vue'
 import CacheRateChart from '@/components/CacheRateChart.vue'
 import CostTrendChart from '@/components/CostTrendChart.vue'
-import { summary } from '@/composables/useTokenData'
+import { storeToRefs } from 'pinia'
+import { useUsageStore } from '@/stores/usage'
+
+const { summary } = storeToRefs(useUsageStore())
 </script>

@@ -15,7 +15,10 @@ import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { PieChart } from 'echarts/charts'
 import { TooltipComponent, LegendComponent } from 'echarts/components'
-import { summary } from '@/composables/useTokenData'
+import { storeToRefs } from 'pinia'
+import { useUsageStore } from '@/stores/usage'
+
+const { summary } = storeToRefs(useUsageStore())
 
 use([CanvasRenderer, PieChart, TooltipComponent, LegendComponent])
 

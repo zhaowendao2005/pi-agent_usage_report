@@ -31,6 +31,10 @@
             <span class="font-mono text-green-600">~/.pi/agent/usage.db</span>
           </div>
           <div class="flex items-center justify-between">
+            <span>UI 配置</span>
+            <span class="font-mono text-green-600">~/.pi/agent/usage_config.yaml</span>
+          </div>
+          <div class="flex items-center justify-between">
             <span>壳</span>
             <span class="flex items-center gap-1 text-green-600">
               <span class="w-1.5 h-1.5 rounded-full bg-green-500" />

@@ -9,16 +9,16 @@ Pi 扩展：在多个终端同时跑 pi 时，采集每次 LLM 调用的 **token
 ## 目录结构
 
 ```
-extensions/     # pi 采集端源码（TS，编译进 dist/extensions）
-demo/           # Vue3 前端源码
-src-tauri/      # Tauri 桌面壳
-  web/          # 前端构建产物（vite 输出到此，已 gitignore）
-  src/          # Rust（rusqlite 只读查询）
-dist/           # 发布产物（自包含）
-  extensions/   # 编译后的扩展 JS（index/collector/db/spawn）
+extensions/           # pi 采集端源码（TS，编译进 dist/extensions）
+src-tauri/
+  src-web/            # Vue3 + Pinia 前端源码
+  web/                # 前端构建产物（vite 输出到此，已 gitignore）
+  src/                # Rust（rusqlite 只读查询 + usage_config.yaml）
+dist/                 # 发布产物（自包含）
+  extensions/         # 编译后的扩展 JS
   pi-usage-monitor.exe
   BUILD_INFO.json
-docs/           # 中文文档
+docs/                 # 中文文档
 ```
 
 `package.json` 的 `pi.extensions` 指向 `./dist/extensions`，所以**装载的是编译后的 JS**，源码 `extensions/*.ts` 只是开发输入。
@@ -53,7 +53,7 @@ dist/pi-usage-monitor.exe
 环境要求：Rust stable、Node 22+、Windows WebView2 Runtime（Win11 一般自带）。
 
 ```bash
-npm install && npm --prefix demo install
+npm install && npm --prefix src-tauri/src-web install
 
 npm run seed    # 写入测试数据到 ~/.pi/agent/usage.db
 npm run dev     # Tauri 开发模式（前端热更新）
@@ -67,15 +67,19 @@ npm run build   # 发布构建 → dist/extensions（编译）+ dist/pi-usage-mo
   └─ extensions/ 采集 ──写入──► ~/.pi/agent/usage.db
                                       ▲ 只读
 Tauri 窗口（Rust invoke + 系统 WebView2）
-  └─ 前端：demo/ 构建进 src-tauri/web
+  └─ 前端：src-tauri/src-web 构建进 src-tauri/web
+  └─ UI 选项：~/.pi/agent/usage_config.yaml
 ```
 
 | 组件 | 路径 | 运行时 |
 |---|---|---|
 | 采集扩展 | `extensions/` | pi 进程内 Node（`node:sqlite`） |
 | 桌面壳 | `src-tauri/` | Tauri 2 + rusqlite |
-| 前端 | `demo/` → `src-tauri/web` | Vue3 + ECharts |
+| 前端 | `src-tauri/src-web/` → `src-tauri/web` | Vue3 + Pinia + ECharts |
 | 数据库 | `~/.pi/agent/usage.db` | SQLite WAL |
+| UI 配置 | `~/.pi/agent/usage_config.yaml` | 统计页小选项持久化 |
+
+默认 UI：时间范围 **过去 24h → 实时**，**LIVE 模式开启**。
 
 ## 文档
 

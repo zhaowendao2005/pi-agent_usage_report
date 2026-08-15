@@ -1,5 +1,7 @@
+mod config;
 mod db;
 
+use config::UsageUiConfig;
 use db::{parse_time, Health, ModelUsage, ServerSummary, TokenDataPoint};
 use serde_json::Value;
 use tauri::Manager;
@@ -12,8 +14,8 @@ fn range_from_args(start: Option<Value>, end: Option<Value>) -> (i64, i64) {
         .unwrap_or(now);
     let start_ms = start
         .as_ref()
-        .map(|v| parse_time(v, end_ms - 6 * 60 * 60 * 1000))
-        .unwrap_or(end_ms - 6 * 60 * 60 * 1000);
+        .map(|v| parse_time(v, end_ms - 24 * 60 * 60 * 1000))
+        .unwrap_or(end_ms - 24 * 60 * 60 * 1000);
     (start_ms, end_ms)
 }
 
@@ -41,6 +43,16 @@ fn get_summary(start: Option<Value>, end: Option<Value>) -> Result<ServerSummary
 }
 
 #[tauri::command]
+fn get_usage_config() -> UsageUiConfig {
+    config::load()
+}
+
+#[tauri::command]
+fn save_usage_config(config: UsageUiConfig) -> Result<(), String> {
+    config::save(&config)
+}
+
+#[tauri::command]
 fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -59,6 +71,8 @@ pub fn run() {
             get_series,
             get_models,
             get_summary,
+            get_usage_config,
+            save_usage_config,
             show_main_window
         ])
         .setup(|app| {

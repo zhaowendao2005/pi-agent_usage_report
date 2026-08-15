@@ -50,7 +50,10 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { series } from '@/composables/useTokenData'
+import { storeToRefs } from 'pinia'
+import { useUsageStore } from '@/stores/usage'
+
+const { series } = storeToRefs(useUsageStore())
 
 const MODEL_COLORS = [
   '#3b82f6', '#a855f7', '#22c55e', '#f59e0b', '#06b6d4', '#ef4444', '#8b5cf6', '#14b8a6',

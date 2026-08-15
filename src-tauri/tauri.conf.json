@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "dev.pi.usage-report",
   "build": {
-    "beforeDevCommand": "npm --prefix demo run dev",
+    "beforeDevCommand": "npm --prefix src-tauri/src-web run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm --prefix demo run build",
+    "beforeBuildCommand": "npm --prefix src-tauri/src-web run build",
     "frontendDist": "web"
   },
   "app": {

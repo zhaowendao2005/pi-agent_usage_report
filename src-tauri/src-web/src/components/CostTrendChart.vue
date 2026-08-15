@@ -15,7 +15,10 @@ import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
-import { series } from '@/composables/useTokenData'
+import { storeToRefs } from 'pinia'
+import { useUsageStore } from '@/stores/usage'
+
+const { series } = storeToRefs(useUsageStore())
 
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent])
 

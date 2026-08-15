@@ -3,8 +3,7 @@ node_modules/
 .DS_Store
 .pi/npm/
 .pi/git/
-demo/node_modules/
-demo/dist/
+src-tauri/src-web/node_modules/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/web/

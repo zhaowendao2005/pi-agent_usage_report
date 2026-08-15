@@ -12,5 +12,5 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": ["extensions/**/*.ts"],
-  "exclude": ["node_modules", "demo", "app", "dist"]
+  "exclude": ["node_modules", "src-tauri", "dist"]
 }
