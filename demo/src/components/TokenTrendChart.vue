@@ -44,7 +44,8 @@ const legend = [
   { name: '输出 Token', color: '#a855f7', axis: 0 },
   { name: '缓存读取',   color: '#22c55e', axis: 0 },
   { name: '缓存写入',   color: '#f59e0b', axis: 0 },
-  { name: 'TPS',        color: '#06b6d4', axis: 1 },
+  { name: 'TPS(含首字)', color: '#06b6d4', axis: 1 },
+  { name: 'TPS(纯生成)', color: '#0ea5e9', axis: 1 },
   { name: '费用/点',    color: '#ef4444', axis: 2 },
 ]
 
@@ -110,15 +111,25 @@ const baseSeries = computed(() => {
       },
     },
     {
-      key: 'TPS',
+      key: 'TPS(含首字)',
       series: {
-        name: 'TPS', type: 'line', smooth: true, yAxisIndex: 1,
-        data: s.map(d => d.tps),
+        name: 'TPS(含首字)', type: 'line', smooth: true, yAxisIndex: 1,
+        data: s.map(d => d.tpsTotal ?? d.tps ?? 0),
         lineStyle: { color: '#06b6d4', width: 2 },
         itemStyle: { color: '#06b6d4' },
         areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
           colorStops: [{ offset: 0, color: 'rgba(6,182,212,0.14)' }, { offset: 1, color: 'rgba(6,182,212,0.01)' }]
         }},
+        symbol: 'none',
+      },
+    },
+    {
+      key: 'TPS(纯生成)',
+      series: {
+        name: 'TPS(纯生成)', type: 'line', smooth: true, yAxisIndex: 1,
+        data: s.map(d => d.tpsGen ?? d.tps ?? 0),
+        lineStyle: { color: '#0ea5e9', width: 2, type: 'dashed' },
+        itemStyle: { color: '#0ea5e9' },
         symbol: 'none',
       },
     },

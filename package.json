@@ -1,13 +1,24 @@
 {
   "name": "usage-report",
   "version": "0.1.0",
-  "description": "Pi extension package scaffold (Hello World). Placeholder for future usage/cost reporting tools.",
+  "description": "Pi extension: multi-instance token/cost/TTFT usage collector + Tauri dashboard",
   "type": "module",
   "license": "MIT",
-  "keywords": ["pi-package", "pi-extension"],
-  "files": ["extensions", "README.md"],
+  "keywords": ["pi-package", "pi-extension", "usage", "token", "cost", "tauri"],
+  "files": [
+    "dist",
+    "docs",
+    "README.md"
+  ],
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": ["./dist/extensions"]
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:web": "npm --prefix demo run build",
+    "dev": "npx tauri dev",
+    "seed": "node scripts/seed-db.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -21,7 +32,8 @@
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
-    "@types/node": "^20.0.0",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^22.0.0",
     "typebox": "*",
     "typescript": "^5.5.0"
   }

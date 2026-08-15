@@ -2,7 +2,7 @@
   <div class="space-y-4">
     <div class="bg-card border border-border rounded-lg overflow-hidden">
       <div class="px-4 py-3 border-b border-border flex items-center justify-between">
-        <h3 class="text-sm font-semibold text-foreground">会话明细</h3>
+        <h3 class="text-sm font-semibold text-foreground">调用明细</h3>
         <span class="text-xs text-muted-foreground">{{ rows.length }} 条记录</span>
       </div>
       <div class="overflow-x-auto">
@@ -29,12 +29,17 @@
               <td class="px-4 py-2.5 text-right font-mono text-purple-600">{{ row.output.toLocaleString() }}</td>
               <td class="px-4 py-2.5 text-right font-mono text-green-600">{{ row.cacheRead.toLocaleString() }}</td>
               <td class="px-4 py-2.5 text-right font-mono text-amber-600">{{ row.cacheWrite.toLocaleString() }}</td>
+              <td class="px-4 py-2.5 text-right font-mono text-cyan-600">{{ row.ttft }}</td>
+              <td class="px-4 py-2.5 text-right font-mono text-sky-600">{{ row.tpsGen }}</td>
               <td class="px-4 py-2.5 text-right font-mono text-foreground">${{ row.cost.toFixed(5) }}</td>
               <td class="px-4 py-2.5 text-right">
                 <span :class="hitRateClass(row.cacheRead, row.input)">
                   {{ hitRate(row.cacheRead, row.input) }}%
                 </span>
               </td>
+            </tr>
+            <tr v-if="rows.length === 0">
+              <td colspan="10" class="px-4 py-8 text-center text-muted-foreground">暂无数据</td>
             </tr>
           </tbody>
         </table>
@@ -47,16 +52,15 @@
 import { computed } from 'vue'
 import { series } from '@/composables/useTokenData'
 
-const MODELS = ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-3-5', 'gpt-4o', 'deepseek-v3']
-const MODEL_COLORS: Record<string, string> = {
-  'claude-opus-4-5':    '#3b82f6',
-  'claude-sonnet-4-5':  '#a855f7',
-  'claude-haiku-3-5':   '#22c55e',
-  'gpt-4o':             '#f59e0b',
-  'deepseek-v3':        '#06b6d4',
-}
+const MODEL_COLORS = [
+  '#3b82f6', '#a855f7', '#22c55e', '#f59e0b', '#06b6d4', '#ef4444', '#8b5cf6', '#14b8a6',
+]
 
-function modelColor(m: string) { return MODEL_COLORS[m] ?? '#64748b' }
+function modelColor(m: string) {
+  let h = 0
+  for (let i = 0; i < m.length; i++) h = (h * 31 + m.charCodeAt(i)) >>> 0
+  return MODEL_COLORS[h % MODEL_COLORS.length]
+}
 
 const columns = [
   { key: 'time',       label: '时间戳' },
@@ -65,6 +69,8 @@ const columns = [
   { key: 'output',     label: '输出 Token' },
   { key: 'cacheRead',  label: '缓存读' },
   { key: 'cacheWrite', label: '缓存写' },
+  { key: 'ttft',       label: 'TTFT' },
+  { key: 'tpsGen',     label: 'TPS(纯生成)' },
   { key: 'cost',       label: '费用 (USD)' },
   { key: 'hitRate',    label: '缓存命中率' },
 ]
@@ -72,17 +78,19 @@ const columns = [
 const rows = computed(() =>
   series.value.map(d => ({
     time: d.time,
-    model: MODELS[Math.floor(Math.random() * MODELS.length)],
+    model: d.model || 'unknown',
     input: d.inputTokens,
     output: d.outputTokens,
     cacheRead: d.cacheRead,
     cacheWrite: d.cacheWrite,
+    ttft: d.ttftMs != null ? `${d.ttftMs}ms` : '—',
+    tpsGen: d.tpsGen ? d.tpsGen.toFixed(1) : '—',
     cost: d.totalCost,
   }))
 )
 
 function hitRate(read: number, input: number) {
-  return input > 0 ? +((read / (read + input)) * 100).toFixed(1) : 0
+  return input + read > 0 ? +((read / (read + input)) * 100).toFixed(1) : 0
 }
 
 function hitRateClass(read: number, input: number) {

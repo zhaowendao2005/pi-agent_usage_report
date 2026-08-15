@@ -1,55 +1,87 @@
 # usage-report
 
-Pi extension package scaffold (Hello World). Placeholder for future usage/cost
-reporting tools.
+Pi 扩展：在多个终端同时跑 pi 时，采集每次 LLM 调用的 **token / 缓存 / 费用 / TTFT / TPS**，写入 `~/.pi/agent/usage.db`，并用 **Tauri 2** 桌面窗口做实时统计仪表盘。
 
-## Install
+## 产物体积
 
-Local directory:
+`dist/pi-usage-monitor.exe` 约 **4.4MB**（使用系统 WebView2，不内嵌 Bun / Chromium）。`dist/` 是自包含产物：**编译后的扩展 JS + 桌面 exe**，直接可作为 pi 包安装/临时装载。
 
-```bash
-pi install ./path/to/usage_report        # add to user settings
-pi install -l ./path/to/usage_report     # add to project settings (.pi/settings.json)
+## 目录结构
+
+```
+extensions/     # pi 采集端源码（TS，编译进 dist/extensions）
+demo/           # Vue3 前端源码
+src-tauri/      # Tauri 桌面壳
+  web/          # 前端构建产物（vite 输出到此，已 gitignore）
+  src/          # Rust（rusqlite 只读查询）
+dist/           # 发布产物（自包含）
+  extensions/   # 编译后的扩展 JS（index/collector/db/spawn）
+  pi-usage-monitor.exe
+  BUILD_INFO.json
+docs/           # 中文文档
 ```
 
-Try without installing (temporary, current run only):
+`package.json` 的 `pi.extensions` 指向 `./dist/extensions`，所以**装载的是编译后的 JS**，源码 `extensions/*.ts` 只是开发输入。
+
+## 安装与使用
 
 ```bash
-pi -e ./path/to/usage_report
+# 先构建（编译扩展 + tauri exe）
+npm run build
+
+# 临时装载测试（仅本次运行生效，不写入 settings）
+pi -e ./dist
+
+# 或正式安装（写入 settings）
+pi install ./path/to/usage_report
+
+# 在 pi 内打开仪表盘
+/usage
+
+# 或直接双击
+dist/pi-usage-monitor.exe
 ```
 
-## What's inside
+辅助命令：
 
-| File                 | Purpose                                             |
-| -------------------- | --------------------------------------------------- |
-| `extensions/index.ts` | Extension entry point — greets on load, registers a `greet` tool and `/hello` command |
+```
+/usage-db    # 打印数据库路径
+```
 
-`package.json` declares the `pi` manifest (`keywords: ["pi-package"]`,
-`pi.extensions: ["./extensions"]`). Core pi packages are declared as
-`peerDependencies` (bundled by pi) and as `devDependencies` for local
-type-checking. See https://pi.dev/docs/latest/packages.
+## 开发
 
-## Test locally
+环境要求：Rust stable、Node 22+、Windows WebView2 Runtime（Win11 一般自带）。
 
 ```bash
-pi -e ./extensions/index.ts
+npm install && npm --prefix demo install
+
+npm run seed    # 写入测试数据到 ~/.pi/agent/usage.db
+npm run dev     # Tauri 开发模式（前端热更新）
+npm run build   # 发布构建 → dist/extensions（编译）+ dist/pi-usage-monitor.exe
 ```
 
-Type-check:
+## 架构
 
-```bash
-npm install    # installs devDependencies for type resolution
-npx tsc --noEmit
+```
+多个 pi 终端
+  └─ extensions/ 采集 ──写入──► ~/.pi/agent/usage.db
+                                      ▲ 只读
+Tauri 窗口（Rust invoke + 系统 WebView2）
+  └─ 前端：demo/ 构建进 src-tauri/web
 ```
 
-## Layout (future)
+| 组件 | 路径 | 运行时 |
+|---|---|---|
+| 采集扩展 | `extensions/` | pi 进程内 Node（`node:sqlite`） |
+| 桌面壳 | `src-tauri/` | Tauri 2 + rusqlite |
+| 前端 | `demo/` → `src-tauri/web` | Vue3 + ECharts |
+| 数据库 | `~/.pi/agent/usage.db` | SQLite WAL |
 
-- `extensions/` — tools, commands, event hooks
-- `skills/` — optional SKILL.md folders
-- `prompts/` — optional prompt templates
-- `themes/` — optional themes
+## 文档
 
-## Docs
+- [数据模型](docs/data-model.md) — 表结构、字段来源、写入策略
+- [API 契约](docs/api-contract.md) — Tauri 命令与数据结构
 
-- Extensions: https://pi.dev/docs/latest/extensions
-- Packages: https://pi.dev/docs/latest/packages
+## 许可证
+
+MIT

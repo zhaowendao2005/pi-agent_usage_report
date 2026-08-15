@@ -1,40 +1,35 @@
 /**
- * usage-report — Pi extension package scaffold (Hello World).
+ * usage-report — Pi extension
  *
- * Replace this file with your real tools/commands. See the official docs:
- * https://pi.dev/docs/latest/extensions
+ * Collects per-LLM-call token/cost/TTFT metrics into ~/.pi/agent/usage.db
+ * and opens a live dashboard via /usage.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { collector } from "./collector.js";
+import { openDashboard } from "./spawn.js";
+import { DB_PATH } from "./db.js";
 
 export default function (pi: ExtensionAPI) {
-  // React to events
-  pi.on("session_start", async (_event, ctx) => {
-    ctx.ui.notify("usage-report extension loaded!", "info");
-  });
+  collector.attach(pi);
 
-  // Register a custom tool callable by the LLM
-  pi.registerTool({
-    name: "greet",
-    label: "Greet",
-    description: "Greet someone by name",
-    parameters: Type.Object({
-      name: Type.String({ description: "Name to greet" }),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      return {
-        content: [{ type: "text", text: `Hello, ${params.name}!` }],
-        details: { greeted: params.name },
-      };
+  pi.registerCommand("usage", {
+    description: "Open Pi token usage dashboard",
+    handler: async (_args, ctx) => {
+      ctx.ui.notify("Starting usage dashboard…", "info");
+      const result = await openDashboard();
+      if (result.ok) {
+        ctx.ui.notify(result.message, "info");
+      } else {
+        ctx.ui.notify(result.message, "error");
+      }
     },
   });
 
-  // Register a slash command
-  pi.registerCommand("hello", {
-    description: "Say hello",
-    handler: async (args, ctx) => {
-      ctx.ui.notify(`Hello ${args || "world"}!`, "info");
+  pi.registerCommand("usage-db", {
+    description: "Show usage database path",
+    handler: async (_args, ctx) => {
+      ctx.ui.notify(`Usage DB: ${DB_PATH}`, "info");
     },
   });
 }

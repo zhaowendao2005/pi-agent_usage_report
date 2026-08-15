@@ -59,8 +59,8 @@
 
     <!-- ===== Footer ===== -->
     <footer class="border-t border-border px-4 py-2 text-xs text-muted-foreground flex items-center justify-between">
-      <span>Pi Agent Token Monitor · demo</span>
-      <span>刷新间隔 {{ refreshInterval }}s · {{ series.length }} 采样点</span>
+      <span>Pi Agent Token Monitor</span>
+      <span>刷新间隔 {{ refreshInterval }}s · {{ series.length }} 次调用</span>
     </footer>
   </div>
 </template>

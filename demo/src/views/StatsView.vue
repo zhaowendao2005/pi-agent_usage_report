@@ -8,7 +8,6 @@
         sub="上游 prompt tokens"
         :icon="ArrowUpCircleIcon"
         accent="blue"
-        :trend="8.3"
       />
       <StatCard
         label="总输出 Token"
@@ -16,7 +15,6 @@
         sub="下游 completion tokens"
         :icon="ArrowDownCircleIcon"
         accent="purple"
-        :trend="-2.1"
       />
       <StatCard
         label="缓存节省"
@@ -24,15 +22,13 @@
         sub="cache read tokens"
         :icon="DatabaseIcon"
         accent="green"
-        :trend="12.5"
       />
       <StatCard
         :label="`总费用`"
-        :value="`$${summary.totalCost}`"
+        :value="`$${(+summary.totalCost).toFixed(4)}`"
         sub="USD · 本期"
         :icon="DollarSignIcon"
         accent="amber"
-        :trend="-4.7"
       />
     </div>
 

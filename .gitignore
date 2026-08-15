@@ -3,4 +3,10 @@ node_modules/
 .DS_Store
 .pi/npm/
 .pi/git/
-demo/dist
+demo/node_modules/
+demo/dist/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/web/
+dist/
+*.exe

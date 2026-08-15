@@ -24,17 +24,17 @@
         <div class="text-xs text-muted-foreground space-y-2">
           <div class="flex items-center justify-between">
             <span>数据端点</span>
-            <span class="font-mono text-foreground">localhost:3721/api/usage</span>
+            <span class="font-mono text-foreground">Tauri invoke / SQLite</span>
           </div>
           <div class="flex items-center justify-between">
-            <span>鉴权方式</span>
-            <span class="font-mono text-green-600">Bearer Token</span>
+            <span>数据文件</span>
+            <span class="font-mono text-green-600">~/.pi/agent/usage.db</span>
           </div>
           <div class="flex items-center justify-between">
-            <span>连接状态</span>
-            <span class="flex items-center gap-1 text-yellow-600">
-              <span class="w-1.5 h-1.5 rounded-full bg-yellow-500" />
-              模拟模式
+            <span>壳</span>
+            <span class="flex items-center gap-1 text-green-600">
+              <span class="w-1.5 h-1.5 rounded-full bg-green-500" />
+              Tauri 2 + WebView2
             </span>
           </div>
         </div>
