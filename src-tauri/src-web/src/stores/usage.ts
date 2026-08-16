@@ -23,6 +23,7 @@ export interface ModelUsage {
   inputTokens: number
   outputTokens: number
   cacheRead: number
+  cacheWrite: number
   cost: number
 }
 
@@ -96,6 +97,7 @@ function normalizeModel(m: any): ModelUsage {
     inputTokens: Number(m.inputTokens ?? m.input_tokens ?? 0) || 0,
     outputTokens: Number(m.outputTokens ?? m.output_tokens ?? 0) || 0,
     cacheRead: Number(m.cacheRead ?? m.cache_read ?? 0) || 0,
+    cacheWrite: Number(m.cacheWrite ?? m.cache_write ?? 0) || 0,
     cost: Number(m.cost ?? 0) || 0,
   }
 }

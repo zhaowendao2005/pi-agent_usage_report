@@ -28,6 +28,7 @@ pub struct ModelUsage {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read: i64,
+    pub cache_write: i64,
     pub cost: f64,
 }
 
@@ -208,7 +209,7 @@ pub fn models(start: i64, end: i64) -> Result<Vec<ModelUsage>, String> {
             r#"
             SELECT m.model,
                    SUM(c.input_tokens), SUM(c.output_tokens),
-                   SUM(c.cache_read), SUM(c.cost_usd)
+                   SUM(c.cache_read), SUM(c.cache_write), SUM(c.cost_usd)
             FROM llm_calls c
             JOIN models m ON m.id = c.model_int
             WHERE c.started_at >= ?1 AND c.started_at < ?2
@@ -220,12 +221,13 @@ pub fn models(start: i64, end: i64) -> Result<Vec<ModelUsage>, String> {
 
     let rows = stmt
         .query_map(rusqlite::params![start, end], |r| {
-            let cost_usd: i64 = r.get::<_, Option<i64>>(4)?.unwrap_or(0);
+            let cost_usd: i64 = r.get::<_, Option<i64>>(5)?.unwrap_or(0);
             Ok(ModelUsage {
                 model: r.get::<_, String>(0).unwrap_or_else(|_| "unknown".into()),
                 input_tokens: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
                 output_tokens: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
                 cache_read: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                cache_write: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
                 cost: (cost_usd as f64) / 1_000_000.0,
             })
         })

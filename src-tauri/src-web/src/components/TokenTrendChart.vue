@@ -22,7 +22,9 @@
       </span>
     </div>
 
-    <v-chart :option="option" :style="{ height: '280px' }" autoresize />
+    <!-- notMerge:false 强制 merge 模式：computed option 每次刷新都是新对象引用，
+         vue-echarts 默认会 notMerge:true 全量重建图表，导致 dataZoom 缩放状态被重置回全量 -->
+    <v-chart :option="option" :style="{ height: '280px' }" autoresize :update-options="{ notMerge: false }" />
   </div>
 </template>
 
@@ -70,7 +72,7 @@ const baseSeries = computed(() => {
     {
       key: '输入 Token',
       series: {
-        name: '输入 Token', type: 'line', smooth: true, yAxisIndex: 0,
+        name: '输入 Token', type: 'line', smooth: true, yAxisIndex: 0, id: 'input',
         data: s.map(d => d.inputTokens),
         lineStyle: { color: '#3b82f6', width: 2 },
         itemStyle: { color: '#3b82f6' },
@@ -83,7 +85,7 @@ const baseSeries = computed(() => {
     {
       key: '输出 Token',
       series: {
-        name: '输出 Token', type: 'line', smooth: true, yAxisIndex: 0,
+        name: '输出 Token', type: 'line', smooth: true, yAxisIndex: 0, id: 'output',
         data: s.map(d => d.outputTokens),
         lineStyle: { color: '#a855f7', width: 2 },
         itemStyle: { color: '#a855f7' },
@@ -96,7 +98,7 @@ const baseSeries = computed(() => {
     {
       key: '缓存读取',
       series: {
-        name: '缓存读取', type: 'line', smooth: true, yAxisIndex: 0,
+        name: '缓存读取', type: 'line', smooth: true, yAxisIndex: 0, id: 'cache-read',
         data: s.map(d => d.cacheRead),
         lineStyle: { color: '#22c55e', width: 1.5, type: 'dashed' },
         itemStyle: { color: '#22c55e' },
@@ -106,7 +108,7 @@ const baseSeries = computed(() => {
     {
       key: '缓存写入',
       series: {
-        name: '缓存写入', type: 'line', smooth: true, yAxisIndex: 0,
+        name: '缓存写入', type: 'line', smooth: true, yAxisIndex: 0, id: 'cache-write',
         data: s.map(d => d.cacheWrite),
         lineStyle: { color: '#f59e0b', width: 1.5, type: 'dashed' },
         itemStyle: { color: '#f59e0b' },
@@ -116,7 +118,7 @@ const baseSeries = computed(() => {
     {
       key: 'TPS(含首字)',
       series: {
-        name: 'TPS(含首字)', type: 'line', smooth: true, yAxisIndex: 1,
+        name: 'TPS(含首字)', type: 'line', smooth: true, yAxisIndex: 1, id: 'tps-total',
         data: s.map(d => d.tpsTotal ?? d.tps ?? 0),
         lineStyle: { color: '#06b6d4', width: 2 },
         itemStyle: { color: '#06b6d4' },
@@ -129,7 +131,7 @@ const baseSeries = computed(() => {
     {
       key: 'TPS(纯生成)',
       series: {
-        name: 'TPS(纯生成)', type: 'line', smooth: true, yAxisIndex: 1,
+        name: 'TPS(纯生成)', type: 'line', smooth: true, yAxisIndex: 1, id: 'tps-gen',
         data: s.map(d => d.tpsGen ?? d.tps ?? 0),
         lineStyle: { color: '#0ea5e9', width: 2, type: 'dashed' },
         itemStyle: { color: '#0ea5e9' },
@@ -139,7 +141,7 @@ const baseSeries = computed(() => {
     {
       key: '费用/点',
       series: {
-        name: '费用/点', type: 'line', smooth: true, yAxisIndex: 2,
+        name: '费用/点', type: 'line', smooth: true, yAxisIndex: 2, id: 'cost',
         data: s.map(d => d.totalCost),
         lineStyle: { color: '#ef4444', width: 1.5, type: 'dotted' },
         itemStyle: { color: '#ef4444' },
@@ -228,7 +230,8 @@ const option = computed(() => {
     ],
     dataZoom: [{
       type: 'inside',
-      start: 0, end: 100,
+      // 注意：不要写死 start/end。computed option 会随 LIVE 刷新/图例切换重算并 setOption，
+      // 一旦带上 start/end，ECharts merge 时就会覆盖用户手动缩放的窗口，导致“缩放自己回正”。
     }, {
       type: 'slider',
       height: 20,
