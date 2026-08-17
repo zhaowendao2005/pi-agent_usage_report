@@ -9,6 +9,8 @@ use std::path::PathBuf;
 #[serde(rename_all = "camelCase")]
 pub struct TokenDataPoint {
     pub time: String,
+    /// null when missing / empty in DB (legacy rows without provider)
+    pub provider: Option<String>,
     pub model: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -19,11 +21,19 @@ pub struct TokenDataPoint {
     pub total_cost: f64,
     pub ttft_ms: Option<i64>,
     pub duration_ms: Option<i64>,
+    /// HTTP status if captured (null for legacy rows)
+    pub http_status: Option<i64>,
+    /// Assistant stopReason (stop/error/aborted/…)
+    pub stop_reason: Option<String>,
+    /// Truncated provider error text
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelUsage {
+    /// null when missing / empty in DB (legacy rows without provider)
+    pub provider: Option<String>,
     pub model: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -43,6 +53,8 @@ pub struct ServerSummary {
     pub total_cache_write: i64,
     pub total_cost: f64,
     pub cache_hit_rate: f64,
+    /// Calls with non-2xx http_status or stop_reason in (error, aborted)
+    pub error_count: i64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -94,10 +106,14 @@ fn open_ro() -> Result<Connection, String> {
               cost_usd INTEGER NOT NULL,
               tps_total REAL,
               tps_gen REAL,
+              http_status INTEGER,
+              stop_reason TEXT,
+              error_message TEXT,
               UNIQUE(session_int, message_id)
             );
             CREATE INDEX IF NOT EXISTS idx_calls_started ON llm_calls(started_at);
             CREATE INDEX IF NOT EXISTS idx_calls_model ON llm_calls(model_int);
+            CREATE INDEX IF NOT EXISTS idx_calls_status ON llm_calls(http_status);
             "#,
         )
         .map_err(|e| e.to_string())?;
@@ -120,6 +136,53 @@ fn format_local(ms: i64) -> String {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         _ => ms.to_string(),
     }
+}
+
+/// Empty / whitespace provider is treated as missing (null) for API consumers.
+fn normalize_provider(raw: Option<String>) -> Option<String> {
+    match raw {
+        Some(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }
+        None => None,
+    }
+}
+
+fn normalize_opt_text(raw: Option<String>) -> Option<String> {
+    match raw {
+        Some(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }
+        None => None,
+    }
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    let sql = format!("PRAGMA table_info({table})");
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let rows = stmt.query_map([], |r| r.get::<_, String>(1));
+    let Ok(rows) = rows else {
+        return false;
+    };
+    for row in rows.flatten() {
+        if row == column {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse start/end: epoch ms number, or "YYYY-MM-DD HH:mm:ss" local string.
@@ -161,36 +224,60 @@ pub fn health() -> Result<Health, String> {
 
 pub fn series(start: i64, end: i64) -> Result<Vec<TokenDataPoint>, String> {
     let conn = open_ro()?;
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT c.started_at, m.model,
+    let has_status = table_has_column(&conn, "llm_calls", "http_status");
+    let has_stop = table_has_column(&conn, "llm_calls", "stop_reason");
+    let has_err = table_has_column(&conn, "llm_calls", "error_message");
+
+    let sql = format!(
+        r#"
+            SELECT c.started_at, m.provider, m.model,
                    c.input_tokens, c.output_tokens, c.cache_read, c.cache_write,
-                   c.tps_total, c.tps_gen, c.cost_usd, c.ttft_ms, c.duration_ms
+                   c.tps_total, c.tps_gen, c.cost_usd, c.ttft_ms, c.duration_ms,
+                   {http_status}, {stop_reason}, {error_message}
             FROM llm_calls c
             JOIN models m ON m.id = c.model_int
             WHERE c.started_at >= ?1 AND c.started_at < ?2
             ORDER BY c.started_at ASC
             "#,
-        )
-        .map_err(|e| e.to_string())?;
+        http_status = if has_status {
+            "c.http_status"
+        } else {
+            "NULL"
+        },
+        stop_reason = if has_stop {
+            "c.stop_reason"
+        } else {
+            "NULL"
+        },
+        error_message = if has_err {
+            "c.error_message"
+        } else {
+            "NULL"
+        },
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
     let rows = stmt
         .query_map(rusqlite::params![start, end], |r| {
             let started_at: i64 = r.get(0)?;
-            let cost_usd: i64 = r.get(8)?;
+            let cost_usd: i64 = r.get(9)?;
             Ok(TokenDataPoint {
                 time: format_local(started_at),
-                model: r.get::<_, String>(1).unwrap_or_else(|_| "unknown".into()),
-                input_tokens: r.get(2)?,
-                output_tokens: r.get(3)?,
-                cache_read: r.get(4)?,
-                cache_write: r.get(5)?,
-                tps_total: r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
-                tps_gen: r.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
+                provider: normalize_provider(r.get::<_, Option<String>>(1)?),
+                model: r.get::<_, String>(2).unwrap_or_else(|_| "unknown".into()),
+                input_tokens: r.get(3)?,
+                output_tokens: r.get(4)?,
+                cache_read: r.get(5)?,
+                cache_write: r.get(6)?,
+                tps_total: r.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
+                tps_gen: r.get::<_, Option<f64>>(8)?.unwrap_or(0.0),
                 total_cost: (cost_usd as f64) / 1_000_000.0,
-                ttft_ms: r.get(9)?,
-                duration_ms: r.get(10)?,
+                ttft_ms: r.get(10)?,
+                duration_ms: r.get(11)?,
+                http_status: r.get::<_, Option<i64>>(12)?,
+                stop_reason: normalize_opt_text(r.get::<_, Option<String>>(13)?),
+                error_message: normalize_opt_text(r.get::<_, Option<String>>(14)?),
             })
         })
         .map_err(|e| e.to_string())?;
@@ -207,13 +294,13 @@ pub fn models(start: i64, end: i64) -> Result<Vec<ModelUsage>, String> {
     let mut stmt = conn
         .prepare(
             r#"
-            SELECT m.model,
+            SELECT m.provider, m.model,
                    SUM(c.input_tokens), SUM(c.output_tokens),
                    SUM(c.cache_read), SUM(c.cache_write), SUM(c.cost_usd)
             FROM llm_calls c
             JOIN models m ON m.id = c.model_int
             WHERE c.started_at >= ?1 AND c.started_at < ?2
-            GROUP BY m.model
+            GROUP BY m.provider, m.model
             ORDER BY SUM(c.cost_usd) DESC
             "#,
         )
@@ -221,13 +308,14 @@ pub fn models(start: i64, end: i64) -> Result<Vec<ModelUsage>, String> {
 
     let rows = stmt
         .query_map(rusqlite::params![start, end], |r| {
-            let cost_usd: i64 = r.get::<_, Option<i64>>(5)?.unwrap_or(0);
+            let cost_usd: i64 = r.get::<_, Option<i64>>(6)?.unwrap_or(0);
             Ok(ModelUsage {
-                model: r.get::<_, String>(0).unwrap_or_else(|_| "unknown".into()),
-                input_tokens: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                output_tokens: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                cache_read: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                cache_write: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                provider: normalize_provider(r.get::<_, Option<String>>(0)?),
+                model: r.get::<_, String>(1).unwrap_or_else(|_| "unknown".into()),
+                input_tokens: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                output_tokens: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                cache_read: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                cache_write: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
                 cost: (cost_usd as f64) / 1_000_000.0,
             })
         })
@@ -242,7 +330,34 @@ pub fn models(start: i64, end: i64) -> Result<Vec<ModelUsage>, String> {
 
 pub fn summary(start: i64, end: i64) -> Result<ServerSummary, String> {
     let conn = open_ro()?;
-    conn.query_row(
+    let has_status = table_has_column(&conn, "llm_calls", "http_status");
+    let has_stop = table_has_column(&conn, "llm_calls", "stop_reason");
+
+    // error_count: non-2xx status OR stop_reason in (error, aborted)
+    let error_expr = match (has_status, has_stop) {
+        (true, true) => {
+            r#"SUM(CASE
+              WHEN http_status IS NOT NULL AND (http_status < 200 OR http_status >= 300) THEN 1
+              WHEN stop_reason IN ('error', 'aborted') THEN 1
+              ELSE 0
+            END)"#
+        }
+        (true, false) => {
+            r#"SUM(CASE
+              WHEN http_status IS NOT NULL AND (http_status < 200 OR http_status >= 300) THEN 1
+              ELSE 0
+            END)"#
+        }
+        (false, true) => {
+            r#"SUM(CASE
+              WHEN stop_reason IN ('error', 'aborted') THEN 1
+              ELSE 0
+            END)"#
+        }
+        (false, false) => "0",
+    };
+
+    let sql = format!(
         r#"
         SELECT
           COUNT(*) AS call_count,
@@ -251,35 +366,38 @@ pub fn summary(start: i64, end: i64) -> Result<ServerSummary, String> {
           COALESCE(SUM(output_tokens), 0),
           COALESCE(SUM(cache_read), 0),
           COALESCE(SUM(cache_write), 0),
-          COALESCE(SUM(cost_usd), 0)
+          COALESCE(SUM(cost_usd), 0),
+          COALESCE({error_expr}, 0) AS error_count
         FROM llm_calls
         WHERE started_at >= ?1 AND started_at < ?2
-        "#,
-        rusqlite::params![start, end],
-        |r| {
-            let call_count: i64 = r.get(0)?;
-            let avg_latency: f64 = r.get(1)?;
-            let total_input: i64 = r.get(2)?;
-            let total_output: i64 = r.get(3)?;
-            let total_cache_read: i64 = r.get(4)?;
-            let total_cache_write: i64 = r.get(5)?;
-            let total_cost_usd: i64 = r.get(6)?;
-            let cache_hit_rate = if total_input + total_cache_read > 0 {
-                (total_cache_read as f64) / ((total_input + total_cache_read) as f64) * 100.0
-            } else {
-                0.0
-            };
-            Ok(ServerSummary {
-                avg_latency: avg_latency.round() as i64,
-                call_count,
-                total_input,
-                total_output,
-                total_cache_read,
-                total_cache_write,
-                total_cost: (total_cost_usd as f64) / 1_000_000.0,
-                cache_hit_rate: (cache_hit_rate * 10.0).round() / 10.0,
-            })
-        },
-    )
+        "#
+    );
+
+    conn.query_row(&sql, rusqlite::params![start, end], |r| {
+        let call_count: i64 = r.get(0)?;
+        let avg_latency: f64 = r.get(1)?;
+        let total_input: i64 = r.get(2)?;
+        let total_output: i64 = r.get(3)?;
+        let total_cache_read: i64 = r.get(4)?;
+        let total_cache_write: i64 = r.get(5)?;
+        let total_cost_usd: i64 = r.get(6)?;
+        let error_count: i64 = r.get(7)?;
+        let cache_hit_rate = if total_input + total_cache_read > 0 {
+            (total_cache_read as f64) / ((total_input + total_cache_read) as f64) * 100.0
+        } else {
+            0.0
+        };
+        Ok(ServerSummary {
+            avg_latency: avg_latency.round() as i64,
+            call_count,
+            total_input,
+            total_output,
+            total_cache_read,
+            total_cache_write,
+            total_cost: (total_cost_usd as f64) / 1_000_000.0,
+            cache_hit_rate: (cache_hit_rate * 10.0).round() / 10.0,
+            error_count,
+        })
+    })
     .map_err(|e| e.to_string())
 }

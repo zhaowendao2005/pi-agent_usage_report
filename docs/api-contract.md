@@ -50,6 +50,7 @@ is_live: true           # 默认开启 LIVE 自动刷新
 ```ts
 interface TokenDataPoint {
   time: string           // 本地 "YYYY-MM-DD HH:mm:ss"
+  provider: string | null // 缺失/空字符串 → null（旧数据兼容）
   model: string
   inputTokens: number    // 上行 token
   outputTokens: number   // 下行 token
@@ -60,17 +61,24 @@ interface TokenDataPoint {
   totalCost: number      // 费用 USD
   ttftMs: number | null  // 首字时长 ms
   durationMs: number | null
+  httpStatus: number | null   // HTTP 状态；旧数据 null
+  stopReason: string | null   // stop|error|aborted|…
+  errorMessage: string | null // 截断错误文案
 }
 ```
 
 ### 模型分布（`get_models`）
 
+按 `(provider, model)` 分组聚合。`provider` 为空时返回 `null`。
+
 ```ts
 interface ModelUsage {
+  provider: string | null
   model: string
   inputTokens: number
   outputTokens: number
   cacheRead: number
+  cacheWrite: number
   cost: number           // USD
 }
 ```
@@ -81,6 +89,7 @@ interface ModelUsage {
 interface ServerSummary {
   avgLatency: number     // AVG(duration_ms)
   callCount: number      // 调用次数
+  errorCount: number     // 非 2xx 或 stopReason∈{error,aborted}
   totalInput: number
   totalOutput: number
   totalCacheRead: number
@@ -115,4 +124,5 @@ interface Health {
 | TPS（含首字） | 行内字段 `tpsTotal`（写入时已算好） |
 | TPS（纯生成） | 行内字段 `tpsGen` |
 | 费用累计曲线 | 对 `series.totalCost` 按时间前缀和 |
-| 模型柱状图 | `get_models` 按模型分组求和 |
+| 模型双环饼图 | 内环：`get_models` 按提供商 / 模型 / 提供商+模型；外环：各分组的缓存命中/写入/输入/输出 |
+| 调用明细 | `get_series` 前端倒序 + 虚拟滚动渲染可视行 |

@@ -48,6 +48,8 @@ const props = defineProps<{
   icon: object
   accent?: 'blue' | 'green' | 'purple' | 'amber' | 'red' | 'cyan'
   trend?: number
+  /** token：计费用 M；count/默认：普通千分位或 K */
+  unit?: 'token' | 'count'
 }>()
 
 const accentMap: Record<string, string> = {
@@ -71,9 +73,18 @@ const glowClass = computed(() => ({
 const displayValue = computed(() => {
   const v = props.value
   if (typeof v === 'number') {
-    if (v >= 1_000_000) return (v / 1_000_000).toFixed(2) + 'M'
-    if (v >= 1_000) return (v / 1_000).toFixed(1) + 'K'
-    return v.toString()
+    if (props.unit === 'token') {
+      // Token 计费向：≥1K 用 M（百万）
+      if (Math.abs(v) >= 1_000) {
+        const m = v / 1_000_000
+        const digits = Math.abs(m) >= 1 ? 2 : 3
+        return m.toFixed(digits).replace(/\.?0+$/, '') + 'M'
+      }
+      return v.toLocaleString()
+    }
+    if (Math.abs(v) >= 1_000_000) return (v / 1_000_000).toFixed(2) + 'M'
+    if (Math.abs(v) >= 1_000) return (v / 1_000).toFixed(1) + 'K'
+    return v.toLocaleString()
   }
   return v
 })

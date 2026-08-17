@@ -1,6 +1,7 @@
 /**
  * Collects per-LLM-call metrics from pi extension events.
  * Batches writes via dual-threshold flush (16 rows OR 2s).
+ * Captures successes and failures (HTTP status + stopReason + errorMessage).
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -9,11 +10,14 @@ import { usageDb, type CallRow } from "./db.js";
 const FLUSH_MAX_ROWS = 16;
 const FLUSH_INTERVAL_MS = 2000;
 const PENDING_HARD_CAP = 512;
+const ERROR_MSG_MAX = 500;
 
 interface PendingTurn {
   t0: number | null;
   ttftMs: number | null;
   firstDeltaSeen: boolean;
+  /** Latest HTTP status from after_provider_response in this turn (retries overwrite). */
+  lastHttpStatus: number | null;
 }
 
 function microUsd(costTotal: number | undefined | null): number {
@@ -21,16 +25,18 @@ function microUsd(costTotal: number | undefined | null): number {
   return Math.round(costTotal * 1_000_000);
 }
 
-function computeTps(input: number, output: number, durationMs: number | null, ttftMs: number | null) {
-  const tokens = input + output;
+/**
+ * TPS 仅按「输出 token」计算（不含 input / cache）。
+ * - tpsTotal（含首字）：output / 全程 duration（含 TTFT）
+ * - tpsGen（纯生成）：output / (duration - ttft)
+ */
+function computeTps(_input: number, output: number, durationMs: number | null, ttftMs: number | null) {
   let tpsTotal: number | null = null;
   let tpsGen: number | null = null;
-  if (durationMs != null && durationMs > 0) {
-    tpsTotal = tokens / (durationMs / 1000);
-  }
-  if (durationMs != null && durationMs > 0) {
+  if (durationMs != null && durationMs > 0 && output > 0) {
+    tpsTotal = output / (durationMs / 1000);
     const genMs = Math.max(1, durationMs - (ttftMs ?? 0));
-    tpsGen = tokens / (genMs / 1000);
+    tpsGen = output / (genMs / 1000);
   }
   return { tpsTotal, tpsGen };
 }
@@ -41,6 +47,37 @@ function messageIdOf(message: any, fallbackSeed: string): string {
   return `syn_${fallbackSeed}`;
 }
 
+/** Missing / empty provider → null (legacy rows without the field read as null). */
+function normalizeProvider(raw: unknown): string | null {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  return s.length > 0 ? s : null;
+}
+
+function normalizeStopReason(raw: unknown): string | null {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  return s.length > 0 ? s : null;
+}
+
+function normalizeErrorMessage(raw: unknown): string | null {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  return s.length > ERROR_MSG_MAX ? s.slice(0, ERROR_MSG_MAX) + "…" : s;
+}
+
+/** Prefer explicit status; else parse 4xx/5xx out of error text. */
+function resolveHttpStatus(explicit: number | null, errorMessage: string | null): number | null {
+  if (explicit != null && Number.isFinite(explicit) && explicit > 0) return Math.trunc(explicit);
+  if (!errorMessage) return null;
+  const m = errorMessage.match(/(?:HTTP\s*|status(?:\s*code)?\s*[:=]?\s*)([45]\d{2})\b/i)
+    ?? errorMessage.match(/\b([45]\d{2})\b/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
 function isTextDeltaEvent(ev: any): boolean {
   if (!ev) return false;
   // assistantMessageEvent shapes vary; accept common ones
@@ -48,10 +85,14 @@ function isTextDeltaEvent(ev: any): boolean {
   return t === "text_delta" || t === "text_start" || t === "content_block_delta";
 }
 
+function emptyPendingTurn(): PendingTurn {
+  return { t0: null, ttftMs: null, firstDeltaSeen: false, lastHttpStatus: null };
+}
+
 export class UsageCollector {
   private pending: CallRow[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
-  private turn: PendingTurn = { t0: null, ttftMs: null, firstDeltaSeen: false };
+  private turn: PendingTurn = emptyPendingTurn();
   private sessionId = "unknown";
   private sessionFile: string | null = null;
   private callSeq = 0;
@@ -84,6 +125,17 @@ export class UsageCollector {
       }
     });
 
+    // HTTP status (incl. 4xx/5xx) before stream consume
+    pi.on("after_provider_response", async (event) => {
+      const status = Number((event as any).status);
+      if (Number.isFinite(status) && status > 0) {
+        this.turn.lastHttpStatus = Math.trunc(status);
+      }
+      if (this.turn.t0 == null) {
+        this.turn.t0 = Date.now();
+      }
+    });
+
     pi.on("message_update", async (event) => {
       if (this.turn.firstDeltaSeen) return;
       const msg = (event as any).message;
@@ -105,8 +157,19 @@ export class UsageCollector {
     pi.on("message_end", async (event, ctx) => {
       const message = (event as any).message;
       if (!message || message.role !== "assistant") return;
+
+      const stopReason = normalizeStopReason(message.stopReason);
+      const errorMessage = normalizeErrorMessage(message.errorMessage);
+      const httpStatus = resolveHttpStatus(this.turn.lastHttpStatus, errorMessage);
       const usage = message.usage;
-      if (!usage) return;
+
+      const isFailure =
+        stopReason === "error" ||
+        stopReason === "aborted" ||
+        (httpStatus != null && (httpStatus < 200 || httpStatus >= 300));
+
+      // Success without usage → skip (nothing useful). Failures always record.
+      if (!usage && !isFailure) return;
 
       this.refreshSession(ctx);
 
@@ -114,12 +177,15 @@ export class UsageCollector {
       const startedAt = this.turn.t0 ?? message.timestamp ?? finishedAt;
       const durationMs = Math.max(0, finishedAt - startedAt);
       const ttftMs = this.turn.ttftMs;
-      const inputTokens = Number(usage.input ?? 0) || 0;
-      const outputTokens = Number(usage.output ?? 0) || 0;
-      const cacheRead = Number(usage.cacheRead ?? 0) || 0;
-      const cacheWrite = Number(usage.cacheWrite ?? 0) || 0;
-      const costUsd = microUsd(usage.cost?.total);
-      const { tpsTotal, tpsGen } = computeTps(inputTokens, outputTokens, durationMs, ttftMs);
+      const inputTokens = Number(usage?.input ?? 0) || 0;
+      const outputTokens = Number(usage?.output ?? 0) || 0;
+      const cacheRead = Number(usage?.cacheRead ?? 0) || 0;
+      const cacheWrite = Number(usage?.cacheWrite ?? 0) || 0;
+      const costUsd = microUsd(usage?.cost?.total);
+      const { tpsTotal, tpsGen } =
+        inputTokens + outputTokens > 0
+          ? computeTps(inputTokens, outputTokens, durationMs, ttftMs)
+          : { tpsTotal: null, tpsGen: null };
 
       this.callSeq += 1;
       const mid = messageIdOf(message, `${this.sessionId}_${startedAt}_${this.callSeq}`);
@@ -132,7 +198,7 @@ export class UsageCollector {
         durationMs,
         sessionId: this.sessionId,
         sessionFile: this.sessionFile,
-        provider: String(message.provider ?? "unknown"),
+        provider: normalizeProvider(message.provider),
         model: String(message.model ?? "unknown"),
         inputTokens,
         outputTokens,
@@ -141,6 +207,9 @@ export class UsageCollector {
         costUsd,
         tpsTotal,
         tpsGen,
+        httpStatus,
+        stopReason,
+        errorMessage,
       };
 
       this.enqueue(row);
@@ -163,6 +232,7 @@ export class UsageCollector {
       this.callSeq += 1;
       const toolName = String((event as any).toolName ?? "tool");
       const toolCallId = String((event as any).toolCallId ?? this.callSeq);
+      const isError = !!(event as any).isError;
       const row: CallRow = {
         messageId: `tool_${toolCallId}_${this.callSeq}`,
         startedAt,
@@ -180,6 +250,9 @@ export class UsageCollector {
         costUsd,
         tpsTotal: null,
         tpsGen: null,
+        httpStatus: null,
+        stopReason: isError ? "error" : "tool",
+        errorMessage: null,
       };
       this.enqueue(row);
     });
@@ -211,7 +284,7 @@ export class UsageCollector {
   }
 
   private resetTurn(): void {
-    this.turn = { t0: null, ttftMs: null, firstDeltaSeen: false };
+    this.turn = emptyPendingTurn();
   }
 
   private enqueue(row: CallRow): void {

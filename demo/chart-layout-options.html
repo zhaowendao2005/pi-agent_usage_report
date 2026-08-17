@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Token 趋势图布局方案对比</title>
+<script>
+  // CDN 多重回退，保证国内也能打开
+  (function () {
+    var cdns = [
+      'https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js',
+      'https://unpkg.com/echarts@5.5.0/dist/echarts.min.js',
+      'https://cdn.bootcdn.net/ajax/libs/echarts/5.5.0/echarts.min.js'
+    ]
+    var i = 0
+    function load() {
+      if (i >= cdns.length) { document.body.insertAdjacentHTML('afterbegin', '<div style="color:red;padding:12px">ECharts 加载失败，请检查网络</div>'); return }
+      var s = document.createElement('script')
+      s.src = cdns[i++]
+      s.onload = function () { window.__echartsReady && window.__echartsReady() }
+      s.onerror = load
+      document.head.appendChild(s)
+    }
+    load()
+  })()
+</script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0 }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f1f5f9; color: #0f172a; padding: 24px }
+  h1 { font-size: 20px; margin-bottom: 6px }
+  .sub { color: #64748b; font-size: 13px; margin-bottom: 24px }
+  .plan { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; margin-bottom: 28px }
+  .plan-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 4px }
+  .badge { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 8px; background: #3b82f6; color: #fff; font-weight: 700; font-size: 14px; flex: none }
+  .plan-title { font-size: 16px; font-weight: 600 }
+  .plan-desc { color: #64748b; font-size: 13px; margin: 6px 0 10px }
+  .pros { font-size: 12px; color: #475569; margin-bottom: 14px }
+  .pros b { color: #16a34a; font-weight: 600 }
+  .pros i { color: #dc2626; font-style: normal; font-weight: 600 }
+  .chart { width: 100% }
+  .row { display: flex; gap: 12px }
+  .row > div { flex: 1; min-width: 0 }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px }
+  .cell { border: 1px solid #f1f5f9; border-radius: 8px; padding: 8px }
+  .cell h4 { font-size: 12px; color: #64748b; font-weight: 500; margin: 2px 0 4px 4px }
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px }
+  .tab { padding: 5px 14px; border-radius: 999px; border: 1px solid #e2e8f0; background: #fff; font-size: 13px; color: #475569; cursor: pointer; transition: all .15s }
+  .tab:hover { background: #f8fafc }
+  .tab.active { background: #3b82f6; border-color: #3b82f6; color: #fff; font-weight: 600 }
+</style>
+</head>
+<body>
+
+<h1>Token 趋势图 · 布局方案对比 Demo</h1>
+<p class="sub">当前 9 条线挤在一张图里（输入/输出/缓存读/缓存写/TPS×2/首字延迟/总耗时/费用）。下面给出 4 种组织方式，选一个你觉得最合适的。</p>
+
+<!-- ═══════════════ 方案 A：分组 Tab ═══════════════ -->
+<section class="plan">
+  <div class="plan-head"><span class="badge">A</span><span class="plan-title">分组 Tab 切换</span></div>
+  <p class="plan-desc">单图区域，顶部 Tab 按指标域切换：Token / 性能 / 费用。每组只放相关的 2~4 条线。</p>
+  <p class="pros"><b>✓ 最简洁</b>，一屏只有一张图，无信息过载；实现改动最小（基本复用现有组件）。<i>✗ 不能跨组对比</i>（比如看不到"延迟升高时费用也在涨"）。</p>
+  <div class="tabs" id="tabsA">
+    <button class="tab active" data-tab="token">Token 与缓存</button>
+    <button class="tab" data-tab="perf">性能（TPS / 延迟）</button>
+    <button class="tab" data-tab="cost">费用</button>
+  </div>
+  <div id="chartA" class="chart" style="height:300px"></div>
+</section>
+
+<!-- ═══════════════ 方案 B：1 主 2 副 ═══════════════ -->
+<section class="plan">
+  <div class="plan-head"><span class="badge">B</span><span class="plan-title">一主两副（纵向联动）</span></div>
+  <p class="plan-desc">Token 主图占大面积放顶部，下方并排两张小图（性能、费用）。三张图 <b>缩放/悬浮联动</b>（拖动任意一张的 dataZoom，其它同步）。</p>
+  <p class="pros"><b>✓ 主次分明</b>，Token 是核心指标给最大空间；<b>✓ 可跨组对比</b>且联动缩放。<i>✗ 纵向占用空间大</i>，页面需要滚动。</p>
+  <div id="chartB1" class="chart" style="height:260px"></div>
+  <div class="row" style="margin-top:10px">
+    <div id="chartB2" class="chart" style="height:160px"></div>
+    <div id="chartB3" class="chart" style="height:160px"></div>
+  </div>
+</section>
+
+<!-- ═══════════════ 方案 C：2×2 网格 ═══════════════ -->
+<section class="plan">
+  <div class="plan-head"><span class="badge">C</span><span class="plan-title">2×2 网格仪表盘</span></div>
+  <p class="plan-desc">四象限等权展示：Token、TPS、延迟、费用。同样支持联动。</p>
+  <p class="pros"><b>✓ 每类指标独立清晰</b>，一眼扫全盘；适合大屏/宽屏。<i>✗ 单图面积小</i>，Token 四线在小图里仍偏挤；窄屏下体验差。</p>
+  <div class="grid2">
+    <div class="cell"><h4>Token 与缓存</h4><div id="chartC1" class="chart" style="height:200px"></div></div>
+    <div class="cell"><h4>TPS</h4><div id="chartC2" class="chart" style="height:200px"></div></div>
+    <div class="cell"><h4>延迟（首字 / 总耗时）</h4><div id="chartC3" class="chart" style="height:200px"></div></div>
+    <div class="cell"><h4>费用 / 点</h4><div id="chartC4" class="chart" style="height:200px"></div></div>
+  </div>
+</section>
+
+<!-- ═══════════════ 方案 D：堆叠面积 + 迷你条 ═══════════════ -->
+<section class="plan">
+  <div class="plan-head"><span class="badge">D</span><span class="plan-title">堆叠面积图 + 迷你指标条</span></div>
+  <p class="plan-desc">Token 改为<b>堆叠面积</b>（4 条线 → 1 个色块，还能直观看到总量），右轴叠 TPS；下方两条 80px 高的迷你图放延迟和费用，全部联动。</p>
+  <p class="pros"><b>✓ 信息密度最高又不乱</b>，堆叠天然消掉 4 条线的杂乱；<b>✓ 纵向紧凑</b>，不用滚太远。<i>✗ 堆叠后单项数值不如折线直观</i>（靠 tooltip 补足）。</p>
+  <div id="chartD1" class="chart" style="height:260px"></div>
+  <div id="chartD2" class="chart" style="height:90px;margin-top:6px"></div>
+  <div id="chartD3" class="chart" style="height:90px;margin-top:6px"></div>
+</section>
+
+<script>
+window.__echartsReady = function () {
+  /* ────────── 模拟数据（与真实字段一致）────────── */
+  const N = 48, STEP = 30 * 60 * 1000
+  const now = Date.now()
+  const pad = n => String(n).padStart(2, '0')
+  const times = [], input = [], output = [], cacheRead = [], cacheWrite = []
+  const tpsTotal = [], tpsGen = [], ttft = [], duration = [], cost = []
+  let a = 9000, b = 3200, c = 14000, d = 1600
+  for (let i = N - 1; i >= 0; i--) {
+    const t = new Date(now - i * STEP)
+    times.push(`${pad(t.getMonth() + 1)}-${pad(t.getDate())} ${pad(t.getHours())}:${pad(t.getMinutes())}`)
+    const spike = Math.random() < 0.08 ? 2.5 : 1
+    a = Math.max(600, a + (Math.random() - 0.5) * 3500) * (spike > 1 ? 1.4 : 1)
+    b = Math.max(300, b + (Math.random() - 0.5) * 1600) * (spike > 1 ? 1.3 : 1)
+    c = Math.max(0, c + (Math.random() - 0.5) * 6000)
+    d = Math.max(0, d + (Math.random() - 0.5) * 900)
+    input.push(Math.round(a)); output.push(Math.round(b))
+    cacheRead.push(Math.round(c)); cacheWrite.push(Math.round(d))
+    tpsTotal.push(+(25 + Math.random() * 55).toFixed(1))
+    tpsGen.push(+(35 + Math.random() * 65).toFixed(1))
+    ttft.push(Math.round(350 + Math.random() * 1500))
+    duration.push(Math.round(2500 + Math.random() * 22000))
+    cost.push(+((a * 3e-6 + b * 1.5e-5 + c * 3e-7) * (0.8 + Math.random() * 0.4)).toFixed(5))
+  }
+
+  /* ────────── 通用样式（与 App 现有风格一致）────────── */
+  const COLOR = { input: '#3b82f6', output: '#a855f7', cr: '#22c55e', cw: '#f59e0b',
+    tpsT: '#06b6d4', tpsG: '#0ea5e9', ttft: '#8b5cf6', dur: '#ec4899', cost: '#ef4444' }
+  const base = {
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'axis', backgroundColor: 'rgba(255,255,255,0.97)',
+      borderColor: 'rgba(0,0,0,0.08)', textStyle: { color: '#334155', fontSize: 12 },
+      axisPointer: { type: 'cross', crossStyle: { color: 'rgba(0,0,0,0.2)' } },
+    },
+    legend: { top: 0, textStyle: { fontSize: 11, color: '#64748b' }, itemWidth: 14, itemHeight: 8, icon: 'roundRect' },
+    grid: { top: 30, right: 16, bottom: 44, left: 8, containLabel: true },
+    xAxis: { type: 'category', data: times, axisTick: { show: false },
+      axisLine: { lineStyle: { color: 'rgba(0,0,0,0.08)' } },
+      axisLabel: { color: '#64748b', fontSize: 10, formatter: v => v.slice(6, 11) } },
+    dataZoom: [
+      { type: 'inside' },
+      { type: 'slider', height: 18, bottom: 2, borderColor: 'transparent',
+        backgroundColor: 'rgba(0,0,0,0.03)', fillerColor: 'rgba(59,130,246,0.12)',
+        handleStyle: { color: '#3b82f6' }, textStyle: { fontSize: 9, color: '#64748b' } },
+    ],
+  }
+  const yAxisV = (name, extra = {}) => Object.assign({
+    type: 'value', name, nameTextStyle: { color: '#94a3b8', fontSize: 10 },
+    splitLine: { lineStyle: { color: 'rgba(0,0,0,0.06)', type: 'dashed' } },
+    axisLabel: { color: '#64748b', fontSize: 10, formatter: v => v >= 1000 ? (v / 1000).toFixed(0) + 'K' : v },
+  }, extra)
+  const line = (name, data, color, opt = {}) => Object.assign({
+    name, type: 'line', smooth: true, data, symbol: 'none',
+    lineStyle: { color, width: 2 }, itemStyle: { color },
+  }, opt)
+  const area = (name, data, color) => ({
+    name, type: 'line', stack: 'tokens', smooth: true, data, symbol: 'none',
+    lineStyle: { color, width: 1 }, itemStyle: { color },
+    areaStyle: { color: color + '66', opacity: 0.55 }, emphasis: { focus: 'series' },
+  })
+
+  const all = []
+  const mk = id => { const c = echarts.init(document.getElementById(id)); all.push(c); return c }
+
+  /* ────────── 方案 A：Tab 切换 ────────── */
+  const chA = mk('chartA')
+  const tabsA = {
+    token: () => Object.assign({}, base, {
+      yAxis: yAxisV('Tokens'),
+      series: [line('输入 Token', input, COLOR.input), line('输出 Token', output, COLOR.output),
+        line('缓存读取', cacheRead, COLOR.cr, { lineStyle: { color: COLOR.cr, width: 1.5, type: 'dashed' } }),
+        line('缓存写入', cacheWrite, COLOR.cw, { lineStyle: { color: COLOR.cw, width: 1.5, type: 'dashed' } })],
+    }),
+    perf: () => Object.assign({}, base, {
+      yAxis: [
+        yAxisV('TPS', { axisLabel: { color: '#0891b2', fontSize: 10 } }),
+        yAxisV('ms', { position: 'right', splitLine: { show: false },
+          axisLabel: { color: '#7c3aed', fontSize: 10, formatter: v => v + 'ms' } }),
+      ],
+      series: [
+        line('TPS(含首字)', tpsTotal, COLOR.tpsT), line('TPS(纯生成)', tpsGen, COLOR.tpsG, { lineStyle: { color: COLOR.tpsG, width: 2, type: 'dashed' } }),
+        line('首字延迟', ttft, COLOR.ttft, { yAxisIndex: 1 }),
+        line('总耗时', duration, COLOR.dur, { yAxisIndex: 1, lineStyle: { color: COLOR.dur, width: 2, type: 'dashed' } }),
+      ],
+    }),
+    cost: () => Object.assign({}, base, {
+      yAxis: yAxisV('USD', { axisLabel: { color: '#dc2626', fontSize: 10, formatter: v => '$' + v.toFixed(3) } }),
+      series: [line('费用/点', cost, COLOR.cost, {
+        areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+          colorStops: [{ offset: 0, color: 'rgba(239,68,68,0.2)' }, { offset: 1, color: 'rgba(239,68,68,0.01)' }] } },
+      })],
+    }),
+  }
+  chA.setOption(tabsA.token())
+  document.getElementById('tabsA').addEventListener('click', e => {
+    const btn = e.target.closest('.tab'); if (!btn) return
+    document.querySelectorAll('#tabsA .tab').forEach(t => t.classList.remove('active'))
+    btn.classList.add('active')
+    chA.setOption(tabsA[btn.dataset.tab](), true)
+  })
+
+  /* ────────── 方案 B：1 主 2 副 ────────── */
+  const chB1 = mk('chartB1'), chB2 = mk('chartB2'), chB3 = mk('chartB3')
+  chB1.setOption(Object.assign({}, base, {
+    yAxis: yAxisV('Tokens'),
+    series: [line('输入 Token', input, COLOR.input), line('输出 Token', output, COLOR.output),
+      line('缓存读取', cacheRead, COLOR.cr, { lineStyle: { color: COLOR.cr, width: 1.5, type: 'dashed' } }),
+      line('缓存写入', cacheWrite, COLOR.cw, { lineStyle: { color: COLOR.cw, width: 1.5, type: 'dashed' } })],
+  }))
+  const miniBase = Object.assign({}, base, { legend: Object.assign({}, base.legend, { top: 0 }), grid: { top: 26, right: 8, bottom: 40, left: 8, containLabel: true } })
+  chB2.setOption(Object.assign({}, miniBase, {
+    title: { text: '性能', left: 4, top: 0, textStyle: { fontSize: 12, color: '#64748b', fontWeight: 500 } },
+    yAxis: [yAxisV('TPS', { nameTextStyle: { fontSize: 9 }, axisLabel: { color: '#0891b2', fontSize: 9 } }),
+      yAxisV('ms', { position: 'right', nameTextStyle: { fontSize: 9 }, splitLine: { show: false }, axisLabel: { color: '#7c3aed', fontSize: 9 } })],
+    series: [line('TPS(含首字)', tpsTotal, COLOR.tpsT, { lineStyle: { color: COLOR.tpsT, width: 1.5 } }),
+      line('首字延迟', ttft, COLOR.ttft, { yAxisIndex: 1, lineStyle: { color: COLOR.ttft, width: 1.5 } }),
+      line('总耗时', duration, COLOR.dur, { yAxisIndex: 1, lineStyle: { color: COLOR.dur, width: 1.5, type: 'dashed' } })],
+  }))
+  chB3.setOption(Object.assign({}, miniBase, {
+    title: { text: '费用', left: 4, top: 0, textStyle: { fontSize: 12, color: '#64748b', fontWeight: 500 } },
+    yAxis: yAxisV('USD', { axisLabel: { color: '#dc2626', fontSize: 9, formatter: v => '$' + v.toFixed(2) } }),
+    series: [line('费用/点', cost, COLOR.cost, {
+      lineStyle: { color: COLOR.cost, width: 1.5 },
+      areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+        colorStops: [{ offset: 0, color: 'rgba(239,68,68,0.18)' }, { offset: 1, color: 'rgba(239,68,68,0.01)' }] } },
+    })],
+  }))
+  echarts.connect([chB1, chB2, chB3])
+
+  /* ────────── 方案 C：2×2 网格 ────────── */
+  const chC1 = mk('chartC1'), chC2 = mk('chartC2'), chC3 = mk('chartC3'), chC4 = mk('chartC4')
+  const cellBase = Object.assign({}, base, {
+    legend: Object.assign({}, base.legend, { top: 0, textStyle: { fontSize: 10, color: '#64748b' } }),
+    grid: { top: 24, right: 8, bottom: 38, left: 4, containLabel: true },
+    dataZoom: [{ type: 'inside' }, Object.assign({}, base.dataZoom[1], { height: 14 })],
+  })
+  chC1.setOption(Object.assign({}, cellBase, {
+    yAxis: yAxisV('', { axisLabel: { color: '#64748b', fontSize: 9, formatter: v => v >= 1000 ? (v / 1000).toFixed(0) + 'K' : v } }),
+    series: [line('输入', input, COLOR.input, { lineStyle: { color: COLOR.input, width: 1.5 } }),
+      line('输出', output, COLOR.output, { lineStyle: { color: COLOR.output, width: 1.5 } }),
+      line('缓存读', cacheRead, COLOR.cr, { lineStyle: { color: COLOR.cr, width: 1, type: 'dashed' } }),
+      line('缓存写', cacheWrite, COLOR.cw, { lineStyle: { color: COLOR.cw, width: 1, type: 'dashed' } })],
+  }))
+  chC2.setOption(Object.assign({}, cellBase, {
+    yAxis: yAxisV(''),
+    series: [line('含首字', tpsTotal, COLOR.tpsT, { lineStyle: { color: COLOR.tpsT, width: 1.5 } }),
+      line('纯生成', tpsGen, COLOR.tpsG, { lineStyle: { color: COLOR.tpsG, width: 1.5, type: 'dashed' } })],
+  }))
+  chC3.setOption(Object.assign({}, cellBase, {
+    yAxis: yAxisV('ms', { axisLabel: { color: '#64748b', fontSize: 9 } }),
+    series: [line('首字延迟', ttft, COLOR.ttft, { lineStyle: { color: COLOR.ttft, width: 1.5 } }),
+      line('总耗时', duration, COLOR.dur, { lineStyle: { color: COLOR.dur, width: 1.5, type: 'dashed' } })],
+  }))
+  chC4.setOption(Object.assign({}, cellBase, {
+    yAxis: yAxisV('$', { axisLabel: { color: '#dc2626', fontSize: 9, formatter: v => '$' + v.toFixed(2) } }),
+    series: [line('费用/点', cost, COLOR.cost, {
+      lineStyle: { color: COLOR.cost, width: 1.5 },
+      areaStyle: { color: 'rgba(239,68,68,0.1)' },
+    })],
+  }))
+  echarts.connect([chC1, chC2, chC3, chC4])
+
+  /* ────────── 方案 D：堆叠面积 + 迷你条 ────────── */
+  const chD1 = mk('chartD1'), chD2 = mk('chartD2'), chD3 = mk('chartD3')
+  chD1.setOption(Object.assign({}, base, {
+    yAxis: [
+      yAxisV('Tokens'),
+      yAxisV('TPS', { position: 'right', splitLine: { show: false },
+        axisLine: { lineStyle: { color: 'rgba(6,182,212,0.4)' } },
+        axisLabel: { color: '#0891b2', fontSize: 10 } }),
+    ],
+    series: [
+      area('输入 Token', input, COLOR.input), area('输出 Token', output, COLOR.output),
+      area('缓存读取', cacheRead, COLOR.cr), area('缓存写入', cacheWrite, COLOR.cw),
+      line('TPS(含首字)', tpsTotal, COLOR.tpsT, { yAxisIndex: 1 }),
+      line('TPS(纯生成)', tpsGen, COLOR.tpsG, { yAxisIndex: 1, lineStyle: { color: COLOR.tpsG, width: 2, type: 'dashed' } }),
+    ],
+  }))
+  const strip = (name, yFmt) => Object.assign({}, base, {
+    legend: { show: false },
+    title: { text: name, left: 6, top: 2, textStyle: { fontSize: 10, color: '#94a3b8', fontWeight: 500 } },
+    grid: { top: 20, right: 44, bottom: 20, left: 8, containLabel: false },
+    dataZoom: [{ type: 'inside' }],
+    xAxis: Object.assign({}, base.xAxis, { axisLabel: { show: false } }),
+    yAxis: yAxisV('', { nameTextStyle: { fontSize: 9 }, axisLabel: Object.assign({ fontSize: 9 }, yFmt) }),
+  })
+  chD2.setOption(Object.assign({}, strip('延迟'), {
+    yAxis: yAxisV('', { axisLabel: { color: '#7c3aed', fontSize: 9, formatter: v => v >= 1000 ? (v / 1000).toFixed(1) + 's' : v + 'ms' },
+      splitLine: { lineStyle: { color: 'rgba(0,0,0,0.05)', type: 'dashed' } } }),
+    series: [line('首字延迟', ttft, COLOR.ttft, { lineStyle: { color: COLOR.ttft, width: 1.5 } }),
+      line('总耗时', duration, COLOR.dur, { lineStyle: { color: COLOR.dur, width: 1.5, type: 'dashed' } })],
+  }))
+  chD3.setOption(Object.assign({}, strip('费用'), {
+    yAxis: yAxisV('', { axisLabel: { color: '#dc2626', fontSize: 9, formatter: v => '$' + v.toFixed(2) },
+      splitLine: { lineStyle: { color: 'rgba(0,0,0,0.05)', type: 'dashed' } } }),
+    series: [line('费用/点', cost, COLOR.cost, {
+      lineStyle: { color: COLOR.cost, width: 1.5 },
+      areaStyle: { color: 'rgba(239,68,68,0.1)' },
+    })],
+  }))
+  echarts.connect([chD1, chD2, chD3])
+
+  window.addEventListener('resize', () => all.forEach(c => c.resize()))
+}
+</script>
+</body>
+</html>

@@ -5,9 +5,13 @@
       <div class="px-4 h-12 flex items-center justify-between">
         <!-- Brand -->
         <div class="flex items-center gap-2.5">
-          <div class="w-6 h-6 rounded bg-primary/20 flex items-center justify-center">
-            <ActivityIcon class="w-3.5 h-3.5 text-primary" />
-          </div>
+          <img
+            src="/logo.svg"
+            alt="Usage Report"
+            class="w-7 h-7 rounded-[7px] shadow-sm border border-border/60 bg-white object-cover"
+            width="28"
+            height="28"
+          />
           <span class="text-sm font-semibold text-foreground">Pi Agent</span>
           <span class="text-muted-foreground text-sm">/</span>
           <span class="text-sm text-muted-foreground">Token Monitor</span>

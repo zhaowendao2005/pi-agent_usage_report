@@ -4,6 +4,8 @@ import { formatDatetime } from '@/lib/utils'
 
 export interface TokenDataPoint {
   time: string
+  /** null when missing (legacy rows / empty provider in DB) */
+  provider: string | null
   model: string
   inputTokens: number
   outputTokens: number
@@ -16,9 +18,17 @@ export interface TokenDataPoint {
   totalCost: number
   ttftMs: number | null
   durationMs: number | null
+  /** HTTP status if known; null for legacy rows */
+  httpStatus: number | null
+  /** stop | error | aborted | toolUse | length | … */
+  stopReason: string | null
+  /** Provider error text (truncated) */
+  errorMessage: string | null
 }
 
 export interface ModelUsage {
+  /** null when missing (legacy rows / empty provider in DB) */
+  provider: string | null
   model: string
   inputTokens: number
   outputTokens: number
@@ -36,6 +46,7 @@ export interface SummaryStats {
   totalCost: number
   requestCount: number
   avgLatency: number
+  errorCount: number
 }
 
 /** Persisted UI options → ~/.pi/agent/usage_config.yaml */
@@ -69,11 +80,31 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
   return invoke<T>(cmd, args)
 }
 
+/** Missing / empty provider field → null (legacy payloads without the key). */
+function normalizeProvider(raw: unknown): string | null {
+  if (raw == null) return null
+  const s = String(raw).trim()
+  return s.length > 0 ? s : null
+}
+
+function normalizeOptText(raw: unknown): string | null {
+  if (raw == null) return null
+  const s = String(raw).trim()
+  return s.length > 0 ? s : null
+}
+
+function normalizeHttpStatus(raw: unknown): number | null {
+  if (raw == null || raw === '') return null
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null
+}
+
 function normalizePoint(raw: any): TokenDataPoint {
   const tpsTotal = Number(raw.tpsTotal ?? raw.tps_total ?? 0) || 0
   const tpsGen = Number(raw.tpsGen ?? raw.tps_gen ?? raw.tps ?? 0) || 0
   return {
     time: String(raw.time ?? ''),
+    provider: normalizeProvider(raw.provider),
     model: String(raw.model ?? 'unknown'),
     inputTokens: Number(raw.inputTokens ?? raw.input_tokens ?? 0) || 0,
     outputTokens: Number(raw.outputTokens ?? raw.output_tokens ?? 0) || 0,
@@ -88,11 +119,15 @@ function normalizePoint(raw: any): TokenDataPoint {
       raw.durationMs == null && raw.duration_ms == null
         ? null
         : Number(raw.durationMs ?? raw.duration_ms),
+    httpStatus: normalizeHttpStatus(raw.httpStatus ?? raw.http_status),
+    stopReason: normalizeOptText(raw.stopReason ?? raw.stop_reason),
+    errorMessage: normalizeOptText(raw.errorMessage ?? raw.error_message),
   }
 }
 
 function normalizeModel(m: any): ModelUsage {
   return {
+    provider: normalizeProvider(m.provider),
     model: String(m.model ?? 'unknown'),
     inputTokens: Number(m.inputTokens ?? m.input_tokens ?? 0) || 0,
     outputTokens: Number(m.outputTokens ?? m.output_tokens ?? 0) || 0,
@@ -149,10 +184,17 @@ export const useUsageStore = defineStore('usage', () => {
   const modelUsage = ref<ModelUsage[]>([])
   const serverAvgLatency = ref(0)
   const serverCallCount = ref(0)
+  const serverErrorCount = ref(0)
 
   let liveTimer: ReturnType<typeof setInterval> | null = null
   let persistTimer: ReturnType<typeof setTimeout> | null = null
   let skipPersist = false
+
+  function isFailedPoint(p: TokenDataPoint): boolean {
+    if (p.httpStatus != null && (p.httpStatus < 200 || p.httpStatus >= 300)) return true
+    if (p.stopReason === 'error' || p.stopReason === 'aborted') return true
+    return false
+  }
 
   const summary = computed<SummaryStats>(() => {
     const s = series.value
@@ -165,6 +207,7 @@ export const useUsageStore = defineStore('usage', () => {
       totalInput + totalCacheRead > 0
         ? +((totalCacheRead / (totalInput + totalCacheRead)) * 100).toFixed(1)
         : 0
+    const localErrors = s.reduce((a, b) => a + (isFailedPoint(b) ? 1 : 0), 0)
     return {
       totalInput,
       totalOutput,
@@ -174,6 +217,7 @@ export const useUsageStore = defineStore('usage', () => {
       totalCost,
       requestCount: serverCallCount.value || s.length,
       avgLatency: serverAvgLatency.value || 0,
+      errorCount: serverErrorCount.value || localErrors,
     }
   })
 
@@ -271,6 +315,7 @@ export const useUsageStore = defineStore('usage', () => {
       modelUsage.value = Array.isArray(modelsJson) ? modelsJson.map(normalizeModel) : []
       serverAvgLatency.value = Number(summaryJson?.avgLatency ?? summaryJson?.avg_latency ?? 0) || 0
       serverCallCount.value = Number(summaryJson?.callCount ?? summaryJson?.call_count ?? 0) || 0
+      serverErrorCount.value = Number(summaryJson?.errorCount ?? summaryJson?.error_count ?? 0) || 0
     } catch (err) {
       lastError.value = String(err)
       console.error('[usage] refresh failed:', err)
