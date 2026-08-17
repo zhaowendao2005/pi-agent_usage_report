@@ -337,9 +337,9 @@ export const useUsageStore = defineStore('usage', () => {
     clearLiveTimer()
     liveTimer = setInterval(() => {
       const end = new Date()
-      if (endIsLive.value) {
-        endTime.value = formatDatetime(end)
-      } else {
+      // 移除这里的 endTime 更新，统一由 refreshData -> applyEndLiveIfNeeded 处理
+      if (!endIsLive.value) {
+        // 仅在固定窗口模式下才需要滚动时间窗口
         const start = new Date(startTime.value.replace(' ', 'T'))
         const endOld = new Date(endTime.value.replace(' ', 'T'))
         let windowMs = 24 * 60 * 60 * 1000
