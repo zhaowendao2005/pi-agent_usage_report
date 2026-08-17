@@ -113,19 +113,22 @@ const modelStats = computed<ModelStat[]>(() => {
     }
 
     stat.calls++
-    // 仅 output、纯生成阶段 TPS（前端重算，兼容旧库）
+    // 使用含首字的 TPS（tpsTotal），防止非流式或极端极小间隔导致纯生成 TPS 被撑大
     {
       const out = d.outputTokens || 0
       const dur = d.durationMs
       if (dur != null && dur > 0 && out > 0) {
-        const genMs = Math.max(1, dur - (d.ttftMs ?? 0))
-        const tps = out / (genMs / 1000)
+        // 统一采用含首字的整体耗时计算 TPS，这对于非流式或流式都更稳健逼真
+        const tps = out / (dur / 1000)
         if (tps > 0) {
           stat.sumTps += tps
           stat.tpsCount++
         }
-      } else if (d.tpsGen && d.tpsGen > 0) {
-        stat.sumTps += d.tpsGen
+      } else if (d.tpsTotal && d.tpsTotal > 0) {
+        stat.sumTps += d.tpsTotal
+        stat.tpsCount++
+      } else if (d.tps && d.tps > 0) {
+        stat.sumTps += d.tps
         stat.tpsCount++
       }
     }

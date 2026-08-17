@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import { formatDatetime } from '@/lib/utils'
 
 export interface TokenDataPoint {
+  id: number
   time: string
   /** null when missing (legacy rows / empty provider in DB) */
   provider: string | null
@@ -103,6 +104,7 @@ function normalizePoint(raw: any): TokenDataPoint {
   const tpsTotal = Number(raw.tpsTotal ?? raw.tps_total ?? 0) || 0
   const tpsGen = Number(raw.tpsGen ?? raw.tps_gen ?? raw.tps ?? 0) || 0
   return {
+    id: Number(raw.id ?? 0),
     time: String(raw.time ?? ''),
     provider: normalizeProvider(raw.provider),
     model: String(raw.model ?? 'unknown'),
@@ -439,6 +441,20 @@ export const useUsageStore = defineStore('usage', () => {
     }
   }
 
+  async function deleteCall(id: number) {
+    try {
+      if (isTauri()) {
+        await tauriInvoke('delete_llm_call', { id })
+      } else {
+        await fetch(`${API_BASE}/api/llm_calls/${id}`, { method: 'DELETE' })
+      }
+      await refreshData()
+    } catch (err) {
+      console.error('[usage] delete call failed:', err)
+      throw err
+    }
+  }
+
   return {
     startTime,
     endTime,
@@ -454,6 +470,7 @@ export const useUsageStore = defineStore('usage', () => {
     summary,
     apiBase,
     refreshData,
+    deleteCall,
     setEndIsLive,
     setTimeRange,
     setLive,

@@ -2,7 +2,7 @@ mod config;
 mod db;
 
 use config::UsageUiConfig;
-use db::{parse_time, Health, ModelUsage, ServerSummary, TokenDataPoint};
+use db::{parse_time, CalibrationScript, Health, ModelUsage, ProviderGroup, ProviderStat, ServerSummary, TokenDataPoint};
 use serde_json::Value;
 use tauri::Manager;
 
@@ -53,6 +53,66 @@ fn save_usage_config(config: UsageUiConfig) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_providers() -> Result<Vec<ProviderStat>, String> {
+    db::get_providers()
+}
+
+#[tauri::command]
+fn get_calibration_script(provider: String) -> Result<Option<CalibrationScript>, String> {
+    db::get_calibration_script(&provider)
+}
+
+#[tauri::command]
+fn get_all_calibration_scripts() -> Result<Vec<CalibrationScript>, String> {
+    db::get_all_calibration_scripts()
+}
+
+#[tauri::command]
+fn save_calibration_script(provider: String, script: String) -> Result<(), String> {
+    db::save_calibration_script(&provider, &script)
+}
+
+#[tauri::command]
+fn delete_calibration_script(provider: String) -> Result<(), String> {
+    db::delete_calibration_script(&provider)
+}
+
+#[tauri::command]
+fn get_all_provider_groups() -> Result<Vec<ProviderGroup>, String> {
+    db::get_all_provider_groups()
+}
+
+#[tauri::command]
+fn create_provider_group(group_name: String, members: Vec<String>) -> Result<i64, String> {
+    db::create_provider_group(&group_name, members)
+}
+
+#[tauri::command]
+fn add_to_provider_group(group_id: i64, provider: String) -> Result<(), String> {
+    db::add_to_provider_group(group_id, &provider)
+}
+
+#[tauri::command]
+fn remove_from_provider_group(group_id: i64, provider: String) -> Result<(), String> {
+    db::remove_from_provider_group(group_id, &provider)
+}
+
+#[tauri::command]
+fn delete_provider_group(group_id: i64) -> Result<(), String> {
+    db::delete_provider_group(group_id)
+}
+
+#[tauri::command]
+fn find_group_by_provider(provider: String) -> Result<Option<ProviderGroup>, String> {
+    db::find_group_by_provider(&provider)
+}
+
+#[tauri::command]
+fn delete_llm_call(id: i64) -> Result<(), String> {
+    db::delete_llm_call(id)
+}
+
+#[tauri::command]
 fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -73,6 +133,18 @@ pub fn run() {
             get_summary,
             get_usage_config,
             save_usage_config,
+            get_providers,
+            get_calibration_script,
+            get_all_calibration_scripts,
+            save_calibration_script,
+            delete_calibration_script,
+            get_all_provider_groups,
+            create_provider_group,
+            add_to_provider_group,
+            remove_from_provider_group,
+            delete_provider_group,
+            find_group_by_provider,
+            delete_llm_call,
             show_main_window
         ])
         .setup(|app| {

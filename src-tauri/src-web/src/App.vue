@@ -57,6 +57,7 @@
       <Transition name="fade" mode="out-in">
         <StatsView  v-if="activeTab === 'stats'" />
         <DetailView v-else-if="activeTab === 'detail'" />
+        <PriceCalibrationView v-else-if="activeTab === 'price'" />
         <ConfigView v-else-if="activeTab === 'config'" />
       </Transition>
     </main>
@@ -73,9 +74,11 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ActivityIcon, BarChart2Icon, ListIcon, SettingsIcon } from 'lucide-vue-next'
+import CalibrationIcon from '@/components/icons/CalibrationIcon.vue'
 import ControlBar   from '@/components/ControlBar.vue'
 import StatsView    from '@/views/StatsView.vue'
 import DetailView   from '@/views/DetailView.vue'
+import PriceCalibrationView from '@/views/PriceCalibrationView.vue'
 import ConfigView   from '@/views/ConfigView.vue'
 import { useUsageStore } from '@/stores/usage'
 
@@ -85,6 +88,7 @@ const { isLive, refreshInterval, series } = storeToRefs(store)
 const tabs = [
   { id: 'stats',  label: '统计',  icon: BarChart2Icon },
   { id: 'detail', label: '明细',  icon: ListIcon      },
+  { id: 'price',  label: '价格校准', icon: CalibrationIcon },
   { id: 'config', label: '配置',  icon: SettingsIcon  },
 ]
 
