@@ -21,6 +21,16 @@ pub struct UsageUiConfig {
     /// Absolute end when not end_is_live and no preset
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_time: Option<String>,
+    /// Enable chart dynamic LOD downsampling (default true)
+    #[serde(default = "default_true")]
+    pub lod_enabled: bool,
+    /// Enable LOD debug logging in console (default false)
+    #[serde(default)]
+    pub log_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for UsageUiConfig {
@@ -32,6 +42,8 @@ impl Default for UsageUiConfig {
             is_live: true,
             start_time: None,
             end_time: None,
+            lod_enabled: true,
+            log_enabled: false,
         }
     }
 }

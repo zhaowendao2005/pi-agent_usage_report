@@ -62,26 +62,83 @@ export function recomputeTps(point: {
 
 export type TrendTooltipMode = 'all' | 'local'
 
-/** 趋势图悬浮：全部指标（模型 + 时间 + 9 项） */
+/** 趋势图悬浮：全部指标（支持单次原始调用与聚合桶统计） */
 export function buildFullPointTooltip(
   point: {
     time?: string
+    timeRange?: string
+    isAggregated?: boolean
+    bucketCount?: number
     provider: string | null
     model: string
+    models?: string[]
     inputTokens: number
     outputTokens: number
     cacheRead: number
     cacheWrite: number
     ttftMs: number | null
+    maxTtftMs?: number | null
     durationMs: number | null
+    maxDurationMs?: number | null
     totalCost: number
+    maxCost?: number
+    maxTpsTotal?: number
+    maxTpsGen?: number
   },
   axisValue: string,
 ): string {
+  const isAgg = !!point.isAggregated && (point.bucketCount ?? 0) > 1
+  const count = point.bucketCount ?? 1
+
+  if (isAgg) {
+    const timeBadge = point.timeRange || axisValue
+    const modelBadge = `<div style="color:#3b82f6;font-weight:600;font-size:11px;margin-bottom:4px;padding:2px 6px;background:rgba(59,130,246,0.1);border-radius:4px;display:inline-block">📦 聚合 ${count} 次调用 · ${point.model}</div>`
+    const head = `<div style="color:#64748b;margin-bottom:6px;font-size:11px">时段：${timeBadge}</div>`
+
+    const items: { name: string; color: string; value: string }[] = [
+      { name: '输入 Token (合计)', color: '#3b82f6', value: formatTokensM(point.inputTokens) },
+      { name: '输出 Token (合计)', color: '#a855f7', value: formatTokensM(point.outputTokens) },
+      { name: '缓存读取 (合计)', color: '#22c55e', value: formatTokensM(point.cacheRead) },
+      { name: '缓存写入 (合计)', color: '#f59e0b', value: formatTokensM(point.cacheWrite) },
+      {
+        name: 'TPS(平均/峰值)',
+        color: '#06b6d4',
+        value: `${(point as any).tpsTotal ?? '—'} / ${point.maxTpsTotal ?? '—'}`,
+      },
+      {
+        name: '首字延迟(均/峰)',
+        color: '#8b5cf6',
+        value: `${fmtSec(point.ttftMs)} / ${fmtSec(point.maxTtftMs)}`,
+      },
+      {
+        name: '总耗时(均/峰)',
+        color: '#ec4899',
+        value: `${fmtSec(point.durationMs)} / ${fmtSec(point.maxDurationMs)}`,
+      },
+      {
+        name: '费用 (合计/单次最高)',
+        color: '#ef4444',
+        value: `$${point.totalCost.toFixed(4)} / $${(point.maxCost ?? point.totalCost).toFixed(4)}`,
+      },
+    ]
+
+    const rows = items
+      .map(
+        i =>
+          `<div style="display:flex;justify-content:space-between;gap:18px">
+            <span style="color:${i.color}">● ${i.name}</span>
+            <span style="font-weight:600">${i.value}</span>
+          </div>`,
+      )
+      .join('')
+
+    const tip = `<div style="margin-top:6px;padding-top:4px;border-top:1px dashed rgba(0,0,0,0.08);color:#94a3b8;font-size:10px">🔍 滚轮放大视口可自动查看单次原始调用</div>`
+    return modelBadge + head + rows + tip
+  }
+
   const modelText = point.provider ? `${point.provider}/${point.model}` : point.model
   const { tpsTotal, tpsGen } = recomputeTps(point as any)
-  const modelLine =
-    `<div style="color:#3b82f6;font-weight:600;font-size:11px;margin-bottom:4px;padding:2px 6px;background:rgba(59,130,246,0.1);border-radius:4px;display:inline-block">${modelText}</div>`
+  const modelLine = `<div style="color:#3b82f6;font-weight:600;font-size:11px;margin-bottom:4px;padding:2px 6px;background:rgba(59,130,246,0.1);border-radius:4px;display:inline-block">${modelText}</div>`
   const head = `<div style="color:#64748b;margin-bottom:6px;font-size:11px">${axisValue}</div>`
   const items: { name: string; color: string; value: string }[] = [
     { name: '输入 Token', color: '#3b82f6', value: formatTokensM(point.inputTokens) },

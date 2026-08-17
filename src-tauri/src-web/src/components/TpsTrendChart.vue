@@ -1,8 +1,13 @@
 <template>
   <div class="bg-card border border-border rounded-lg p-4">
-    <div class="mb-2">
-      <h3 class="text-sm font-semibold text-foreground">TPS 趋势</h3>
-      <p class="text-xs text-muted-foreground mt-0.5">仅输出 token · 含首字=全程 / 纯生成=去掉 TTFT</p>
+    <div class="flex items-start justify-between gap-2 mb-2">
+      <div>
+        <h3 class="text-sm font-semibold text-foreground">TPS 趋势</h3>
+        <p class="text-xs text-muted-foreground mt-0.5">仅输出 token · 含首字=全程 / 纯生成=去掉 TTFT</p>
+      </div>
+      <div v-if="isAggregated" class="inline-flex items-center gap-1 rounded bg-cyan-500/10 px-2 py-0.5 text-[10px] font-medium text-cyan-600 dark:text-cyan-400">
+        <span>📦 {{ modeText }}</span>
+      </div>
     </div>
     <div class="flex flex-wrap gap-x-3 gap-y-1 mb-2 text-[11px]">
       <button
@@ -22,6 +27,7 @@
       :style="{ height: '240px' }"
       autoresize
       :update-options="{ notMerge: false, replaceMerge: ['series'] }"
+      @datazoom="onDataZoom"
     />
   </div>
 </template>
@@ -33,15 +39,14 @@ import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, DataZoomComponent } from 'echarts/components'
-import { storeToRefs } from 'pinia'
-import { useUsageStore } from '@/stores/usage'
+import { useTrendDownsampler } from '@/composables/useTrendDownsampler'
 import { recomputeTps, buildFullPointTooltip, type TrendTooltipMode } from '@/lib/utils'
 
 const props = withDefaults(defineProps<{ tooltipMode?: TrendTooltipMode }>(), {
   tooltipMode: 'all',
 })
 
-const { series } = storeToRefs(useUsageStore())
+const { renderedPoints, isAggregated, modeText, onDataZoom } = useTrendDownsampler()
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, DataZoomComponent])
 
 const legend = [
@@ -57,9 +62,9 @@ function toggle(name: string) {
 
 const option = computed(() => {
   void props.tooltipMode
-  const s = series.value
+  const s = renderedPoints.value
   const times = s.map(d => d.time)
-  const tps = s.map(d => recomputeTps(d))
+  const tps = s.map(d => (d.isAggregated ? { tpsTotal: d.tpsTotal, tpsGen: d.tpsGen } : recomputeTps(d)))
 
   const seriesOpt = [
     {

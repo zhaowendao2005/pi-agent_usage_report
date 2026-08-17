@@ -15,21 +15,21 @@ import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
-import { storeToRefs } from 'pinia'
-import { useUsageStore } from '@/stores/usage'
+import { useTrendDownsampler } from '@/composables/useTrendDownsampler'
 
-const { series } = storeToRefs(useUsageStore())
+const { renderedPoints } = useTrendDownsampler()
 
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent])
 
 const option = computed(() => {
   // cumulative cost
   let cum = 0
-  const cumData = series.value.map(d => {
+  const points = renderedPoints.value
+  const cumData = points.map(d => {
     cum += d.totalCost
     return +cum.toFixed(6)
   })
-  const times = series.value.map(d => d.time)
+  const times = points.map(d => d.time)
   return {
     backgroundColor: 'transparent',
     tooltip: {

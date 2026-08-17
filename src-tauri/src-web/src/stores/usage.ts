@@ -58,6 +58,8 @@ export interface UsageUiConfig {
   is_live: boolean
   start_time?: string | null
   end_time?: string | null
+  lod_enabled?: boolean
+  log_enabled?: boolean
 }
 
 const DEFAULT_CONFIG: UsageUiConfig = {
@@ -67,6 +69,8 @@ const DEFAULT_CONFIG: UsageUiConfig = {
   is_live: true,
   start_time: null,
   end_time: null,
+  lod_enabled: true,
+  log_enabled: false,
 }
 
 // Empty = same-origin HTTP (legacy bun server / vite proxy)
@@ -178,6 +182,8 @@ export const useUsageStore = defineStore('usage', () => {
   const refreshInterval = ref(DEFAULT_CONFIG.refresh_interval)
   const isLive = ref(DEFAULT_CONFIG.is_live)
   const activePreset = ref(DEFAULT_CONFIG.time_preset)
+  const lodEnabled = ref(DEFAULT_CONFIG.lod_enabled ?? true)
+  const logEnabled = ref(DEFAULT_CONFIG.log_enabled ?? false)
   const loading = ref(false)
   const lastError = ref<string | null>(null)
   const ready = ref(false)
@@ -237,6 +243,8 @@ export const useUsageStore = defineStore('usage', () => {
       is_live: isLive.value,
       start_time: activePreset.value ? null : startTime.value,
       end_time: activePreset.value || endIsLive.value ? null : endTime.value,
+      lod_enabled: lodEnabled.value,
+      log_enabled: logEnabled.value,
     }
   }
 
@@ -430,6 +438,9 @@ export const useUsageStore = defineStore('usage', () => {
       applyTimePreset('24h')
     }
 
+    lodEnabled.value = cfg.lod_enabled !== false
+    logEnabled.value = cfg.log_enabled === true
+
     ready.value = true
     skipPersist = false
 
@@ -439,6 +450,16 @@ export const useUsageStore = defineStore('usage', () => {
     } else {
       isLive.value = false
     }
+  }
+
+  function setLodEnabled(val: boolean) {
+    lodEnabled.value = val
+    schedulePersist()
+  }
+
+  function setLogEnabled(val: boolean) {
+    logEnabled.value = val
+    schedulePersist()
   }
 
   async function deleteCall(id: number) {
@@ -462,6 +483,8 @@ export const useUsageStore = defineStore('usage', () => {
     refreshInterval,
     isLive,
     activePreset,
+    lodEnabled,
+    logEnabled,
     loading,
     lastError,
     ready,
@@ -475,6 +498,8 @@ export const useUsageStore = defineStore('usage', () => {
     setTimeRange,
     setLive,
     setRefreshInterval,
+    setLodEnabled,
+    setLogEnabled,
     applyTimePreset,
     init,
     persistConfig,
