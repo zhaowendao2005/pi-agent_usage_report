@@ -54,31 +54,35 @@
         <div class="flex items-center gap-2">
           <button
             type="button"
-            class="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent transition-colors"
+            class="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent transition-colors inline-flex items-center gap-1.5"
             @click="runDebug"
           >
-            🐛 调试
+            <BugIcon class="w-3.5 h-3.5 shrink-0" />
+            调试
           </button>
           <button
             type="button"
-            class="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent transition-colors"
+            class="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent transition-colors inline-flex items-center gap-1.5"
             @click="formatCode"
           >
-            ✨ 格式化
+            <SparklesIcon class="w-3.5 h-3.5 shrink-0" />
+            格式化
           </button>
           <button
             type="button"
-            class="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent transition-colors"
+            class="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent transition-colors inline-flex items-center gap-1.5"
             @click="insertTemplate"
           >
-            📋 插入模板
+            <ClipboardListIcon class="w-3.5 h-3.5 shrink-0" />
+            插入模板
           </button>
           <button
             type="button"
-            class="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent transition-colors text-red-600 hover:bg-red-50"
+            class="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent transition-colors text-red-600 hover:bg-red-50 inline-flex items-center gap-1.5"
             @click="clearCode"
           >
-            🗑️ 清空
+            <Trash2Icon class="w-3.5 h-3.5 shrink-0" />
+            清空
           </button>
         </div>
         <div class="flex items-center gap-2">
@@ -104,6 +108,15 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import {
+  BugIcon,
+  ClipboardListIcon,
+  SparklesIcon,
+  Trash2Icon,
+} from 'lucide-vue-next'
+import { useMessage } from '@/lib/message'
+
+const message = useMessage()
 
 const props = defineProps<{
   provider: string
@@ -127,9 +140,18 @@ function save() {
   emit('save', props.provider, code.value)
 }
 
-function clearCode() {
-  if (confirm('确定要清空脚本吗？')) {
+async function clearCode() {
+  const ok = await message.confirm({
+    title: '清空脚本',
+    message: '确定要清空脚本吗？',
+    confirmText: '清空',
+    cancelText: '取消',
+    danger: true,
+  })
+  if (ok) {
     code.value = ''
+    debugOutput.value = ''
+    debugError.value = false
   }
 }
 
@@ -158,7 +180,7 @@ function formatCode() {
   }
 }
 
-function insertTemplate() {
+async function insertTemplate() {
   const template = `// 示例配置
 const config = {
   baseURL: 'https://api.example.com/v1',
@@ -183,8 +205,14 @@ function calculatePrice(usage) {
 // 导出配置
 export { config, calculatePrice };`
 
-  if (code.value && !confirm('当前有内容，确定要插入模板吗？')) {
-    return
+  if (code.value) {
+    const ok = await message.confirm({
+      title: '插入模板',
+      message: '当前有内容，确定要插入模板吗？插入后将覆盖现有脚本。',
+      confirmText: '插入',
+      cancelText: '取消',
+    })
+    if (!ok) return
   }
   code.value = template
   debugOutput.value = '✓ 模板已插入'

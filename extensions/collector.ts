@@ -29,6 +29,7 @@ function microUsd(costTotal: number | undefined | null): number {
  * TPS 仅按「输出 token」计算（不含 input / cache）。
  * - tpsTotal（含首字）：output / 全程 duration（含 TTFT）
  * - tpsGen（纯生成）：output / (duration - ttft)
+ *   当生成时长 < 2s 时视作非流式，tpsGen = tpsTotal
  */
 function computeTps(_input: number, output: number, durationMs: number | null, ttftMs: number | null) {
   let tpsTotal: number | null = null;
@@ -36,7 +37,12 @@ function computeTps(_input: number, output: number, durationMs: number | null, t
   if (durationMs != null && durationMs > 0 && output > 0) {
     tpsTotal = output / (durationMs / 1000);
     const genMs = Math.max(1, durationMs - (ttftMs ?? 0));
-    tpsGen = output / (genMs / 1000);
+    // 生成时长 < 2s 视作非流式，直接用 tpsTotal
+    if (genMs < 2000) {
+      tpsGen = tpsTotal;
+    } else {
+      tpsGen = output / (genMs / 1000);
+    }
   }
   return { tpsTotal, tpsGen };
 }

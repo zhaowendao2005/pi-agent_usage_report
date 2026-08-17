@@ -3,12 +3,22 @@
     <!-- Header -->
     <div class="flex items-center justify-between gap-3">
       <div>
-        <h2 class="text-lg font-semibold text-foreground">价格校准</h2>
+        <h2 class="text-lg font-semibold text-foreground flex items-center gap-2">
+          <CalibrationIcon class="w-5 h-5 text-muted-foreground" />
+          价格校准
+        </h2>
         <p class="text-xs text-muted-foreground mt-0.5">
           为每个提供商编写自定义价格计算脚本 · 配置存储在数据库 · 拖拽卡片可合并分组
         </p>
       </div>
       <div class="flex items-center gap-2">
+        <button
+          type="button"
+          class="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent transition-colors"
+          @click="authenticate"
+        >
+          鉴权
+        </button>
         <button
           type="button"
           class="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent transition-colors"
@@ -131,6 +141,10 @@ import { storeToRefs } from 'pinia'
 import { usePriceCalibrationStore } from '@/stores/priceCalibration'
 import ProviderCard from '@/components/ProviderCard.vue'
 import ScriptEditorDrawer from '@/components/ScriptEditorDrawer.vue'
+import CalibrationIcon from '@/components/icons/CalibrationIcon.vue'
+import { useMessage } from '@/lib/message'
+
+const message = useMessage()
 
 const store = usePriceCalibrationStore()
 const { 
@@ -199,7 +213,12 @@ function closeEditor() {
 }
 
 async function onSaveScript(provider: string, script: string) {
-  await store.saveScript(provider, script)
+  try {
+    await store.saveScript(provider, script)
+    message.success(`脚本已保存: ${provider}`)
+  } catch (err) {
+    message.error('保存失败: ' + String(err))
+  }
   closeEditor()
 }
 
@@ -244,44 +263,62 @@ async function onMerge(source: string, target: string) {
   try {
     // Check if target is a group
     const targetGroup = groups.value.find(g => g.groupName === target)
-    
+
     if (targetGroup) {
       // Add source to existing group
       await store.addToGroup(targetGroup.id, source)
+      message.success(`已将 ${source} 合并到分组 ${target}`)
     } else {
       // Check if source is already in a group
       const sourceGroup = await store.findGroupByProvider(source)
       if (sourceGroup) {
-        alert('源提供商已在分组中，请先将其移出分组')
+        message.error('源提供商已在分组中，请先将其移出分组')
         return
       }
-      
+
       // Check if target is in a group
       const targetInGroup = await store.findGroupByProvider(target)
       if (targetInGroup) {
         // Add source to target's group
         await store.addToGroup(targetInGroup.id, source)
+        message.success(`已将 ${source} 合并到分组 ${targetInGroup.groupName}`)
       } else {
         // Create new group with both
         const groupName = `${target}-group`
         await store.createGroup(groupName, [target, source])
+        message.success(`已创建分组 ${groupName}`)
       }
     }
   } catch (err) {
-    alert('合并失败: ' + String(err))
+    message.error('合并失败: ' + String(err))
   }
 }
 
 async function onDeleteGroup(groupId: number) {
-  await store.deleteGroup(groupId)
+  try {
+    await store.deleteGroup(groupId)
+    message.success('分组已解散')
+  } catch (err) {
+    message.error('解散失败: ' + String(err))
+  }
 }
 
 async function onRemoveMember(groupId: number, member: string) {
-  await store.removeFromGroup(groupId, member)
+  try {
+    await store.removeFromGroup(groupId, member)
+    message.success(`已将 ${member} 移出分组`)
+  } catch (err) {
+    message.error('移出失败: ' + String(err))
+  }
 }
 
 async function refresh() {
   await store.init()
+}
+
+function authenticate() {
+  // TODO: 实现OAuth授权逻辑
+  console.log('鉴权按钮被点击')
 }
 
 onMounted(() => {

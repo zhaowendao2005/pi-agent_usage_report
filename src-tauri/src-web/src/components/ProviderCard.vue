@@ -19,16 +19,18 @@
     <div v-if="isGroup" class="flex items-start justify-between mb-3">
       <div class="flex items-center gap-2">
         <span
-          class="px-2 py-1 rounded text-xs font-mono font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+          class="px-2 py-1 rounded text-xs font-mono font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 inline-flex items-center gap-1.5"
         >
-          📦 {{ displayName }}
+          <PackageIcon class="w-3.5 h-3.5 shrink-0" />
+          {{ displayName }}
         </span>
         <button
           type="button"
-          class="text-xs text-muted-foreground hover:text-foreground"
+          class="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
           @click.stop="toggleExpanded"
         >
-          {{ expanded ? '▼' : '▶' }} {{ group.members.length }} 个
+          <component :is="expanded ? ChevronDownIcon : ChevronRightIcon" class="w-3 h-3 shrink-0" />
+          {{ group.members.length }} 个
         </button>
       </div>
       <button
@@ -37,7 +39,7 @@
         @click.stop="onDeleteGroup"
         title="解散分组"
       >
-        ✕
+        <XIcon class="w-3.5 h-3.5" />
       </button>
     </div>
 
@@ -72,7 +74,7 @@
           @click.stop="onRemoveMember(member)"
           title="移出分组"
         >
-          ✕
+          <XIcon class="w-3.5 h-3.5" />
         </button>
       </div>
     </div>
@@ -89,17 +91,29 @@
       </div>
     </div>
 
-    <!-- Action Button -->
-    <button
-      type="button"
-      class="w-full px-3 py-2 text-xs font-medium rounded transition-colors"
-      :class="hasScript
-        ? 'bg-accent text-foreground hover:bg-accent/80'
-        : 'border border-border hover:bg-accent'"
-      @click.stop="onEditScript"
-    >
-      {{ hasScript ? '📝 编辑脚本' : '➕ 添加脚本' }}
-    </button>
+    <!-- Action Buttons -->
+    <div class="flex items-center gap-2">
+      <button
+        type="button"
+        class="flex-1 px-3 py-2 text-xs font-medium rounded transition-colors inline-flex items-center justify-center gap-1.5"
+        :class="hasScript
+          ? 'bg-accent text-foreground hover:bg-accent/80'
+          : 'border border-border hover:bg-accent'"
+        @click.stop="onEditScript"
+      >
+        <FileCode2Icon v-if="hasScript" class="w-3.5 h-3.5 shrink-0" />
+        <PlusIcon v-else class="w-3.5 h-3.5 shrink-0" />
+        {{ hasScript ? '编辑脚本' : '添加脚本' }}
+      </button>
+      <button
+        type="button"
+        class="px-3 py-2 text-xs font-medium border border-border rounded hover:bg-accent transition-colors"
+        @click.stop="onAuthenticate"
+        title="OAuth授权"
+      >
+        鉴权
+      </button>
+    </div>
 
     <!-- Drag Hint -->
     <div v-if="isDragOver" class="absolute inset-0 flex items-center justify-center bg-blue-500/10 rounded-lg pointer-events-none">
@@ -110,7 +124,18 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  FileCode2Icon,
+  PackageIcon,
+  PlusIcon,
+  XIcon,
+} from 'lucide-vue-next'
 import type { ProviderStat, ProviderGroup } from '@/stores/priceCalibration'
+import { useMessage } from '@/lib/message'
+
+const message = useMessage()
 
 const props = defineProps<{
   provider?: ProviderStat
@@ -201,19 +226,36 @@ function onEditScript() {
   emit('editScript', displayName.value)
 }
 
+function onAuthenticate() {
+  // TODO: 实现OAuth授权逻辑
+  console.log('鉴权按钮被点击:', displayName.value)
+}
+
 function toggleExpanded() {
   expanded.value = !expanded.value
 }
 
-function onDeleteGroup() {
-  if (props.group && confirm(`确定要解散分组"${props.group.groupName}"吗？成员将恢复为独立提供商。`)) {
-    emit('deleteGroup', props.group.id)
-  }
+async function onDeleteGroup() {
+  if (!props.group) return
+  const ok = await message.confirm({
+    title: '解散分组',
+    message: `确定要解散分组"${props.group.groupName}"吗？成员将恢复为独立提供商。`,
+    confirmText: '解散',
+    cancelText: '取消',
+    danger: true,
+  })
+  if (ok) emit('deleteGroup', props.group.id)
 }
 
-function onRemoveMember(member: string) {
-  if (props.group && confirm(`确定将"${member}"移出分组吗？`)) {
-    emit('removeMember', props.group.id, member)
-  }
+async function onRemoveMember(member: string) {
+  if (!props.group) return
+  const ok = await message.confirm({
+    title: '移出分组',
+    message: `确定将"${member}"移出分组吗？`,
+    confirmText: '移出',
+    cancelText: '取消',
+    danger: true,
+  })
+  if (ok) emit('removeMember', props.group.id, member)
 }
 </script>

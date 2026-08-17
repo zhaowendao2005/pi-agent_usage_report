@@ -67,6 +67,9 @@
       <span>Pi Agent Token Monitor</span>
       <span>刷新间隔 {{ refreshInterval }}s · {{ series.length }} 次调用</span>
     </footer>
+
+    <!-- ===== Global Message (toast + confirm) ===== -->
+    <AppMessage />
   </div>
 </template>
 
@@ -75,6 +78,7 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ActivityIcon, BarChart2Icon, ListIcon, SettingsIcon } from 'lucide-vue-next'
 import CalibrationIcon from '@/components/icons/CalibrationIcon.vue'
+import AppMessage   from '@/components/AppMessage.vue'
 import ControlBar   from '@/components/ControlBar.vue'
 import StatsView    from '@/views/StatsView.vue'
 import DetailView   from '@/views/DetailView.vue'

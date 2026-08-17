@@ -51,7 +51,7 @@ export function recomputeTps(point: {
   if (dur != null && dur > 0 && out > 0) {
     const tpsTotal = out / (dur / 1000)
     const genMs = Math.max(1, dur - (point.ttftMs ?? 0))
-    const tpsGen = out / (genMs / 1000)
+    const tpsGen = genMs < 2000 ? tpsTotal : out / (genMs / 1000)
     return { tpsTotal, tpsGen }
   }
   return {

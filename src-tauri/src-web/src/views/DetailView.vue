@@ -138,21 +138,23 @@
       </div>
     </div>
 
-    <!-- Elegant Mini Right-click Context Menu -->
-    <div
-      v-if="contextMenu.show"
-      :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }"
-      class="fixed z-50 w-32 bg-popover border border-border rounded shadow-lg py-1 text-xs text-foreground animate-fade-in"
-    >
-      <button
-        type="button"
-        class="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/20 rounded-sm text-left transition-colors cursor-pointer"
-        @click="deleteSelectedCall"
+    <Teleport to="body">
+      <!-- Elegant Mini Right-click Context Menu -->
+      <div
+        v-if="contextMenu.show"
+        :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }"
+        class="fixed z-50 w-32 bg-popover border border-border rounded shadow-lg py-1 text-xs text-foreground animate-fade-in"
       >
-        <Trash2Icon class="w-3.5 h-3.5 shrink-0" />
-        <span class="font-medium">删除这条记录</span>
-      </button>
-    </div>
+        <button
+          type="button"
+          class="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/20 rounded-sm text-left transition-colors cursor-pointer"
+          @click="deleteSelectedCall"
+        >
+          <Trash2Icon class="w-3.5 h-3.5 shrink-0" />
+          <span class="font-medium">删除这条记录</span>
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -162,6 +164,9 @@ import { storeToRefs } from 'pinia'
 import { useUsageStore } from '@/stores/usage'
 import { formatTokensM, fmtSec, recomputeTps } from '@/lib/utils'
 import { Trash2Icon } from 'lucide-vue-next'
+import { useMessage } from '@/lib/message'
+
+const message = useMessage()
 
 const usageStore = useUsageStore()
 const { series, summary } = storeToRefs(usageStore)
@@ -439,15 +444,24 @@ function closeContextMenu() {
 
 async function deleteSelectedCall() {
   const id = contextMenu.value.rowId
-  if (id == null) return
-  if (confirm('确定要永久删除这条 LLM 调用记录吗？此操作无法撤销。')) {
-    try {
-      await usageStore.deleteCall(id)
-    } catch (err) {
-      alert('删除失败: ' + String(err))
-    }
-  }
   closeContextMenu()
+  if (id == null) return
+
+  const ok = await message.confirm({
+    title: '删除记录',
+    message: '确定要永久删除这条 LLM 调用记录吗？此操作无法撤销。',
+    confirmText: '永久删除',
+    cancelText: '取消',
+    danger: true,
+  })
+  if (!ok) return
+
+  try {
+    await usageStore.deleteCall(id)
+    message.success('记录已删除')
+  } catch (err) {
+    message.error('删除失败: ' + String(err))
+  }
 }
 
 onUnmounted(() => {

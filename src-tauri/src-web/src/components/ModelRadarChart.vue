@@ -1,9 +1,32 @@
 <template>
   <div class="bg-card border border-border rounded-lg p-4">
     <!-- Header -->
-    <div class="mb-3">
-      <h3 class="text-sm font-semibold text-foreground">模型性能雷达</h3>
-      <p class="text-xs text-muted-foreground mt-0.5">六维归一化对比 · 点击模型标签叠加显示</p>
+    <div class="mb-3 flex items-start justify-between">
+      <div>
+        <h3 class="text-sm font-semibold text-foreground">模型性能雷达</h3>
+        <p class="text-xs text-muted-foreground mt-0.5">六维归一化对比 · 点击模型标签叠加显示</p>
+      </div>
+      <!-- TPS 类型切换 -->
+      <div class="flex items-center gap-1 bg-muted/60 rounded-lg p-0.5">
+        <button
+          @click="useTpsGen = false"
+          class="px-2.5 py-1 rounded text-xs font-medium transition-all"
+          :class="!useTpsGen 
+            ? 'bg-white text-foreground shadow-sm' 
+            : 'text-muted-foreground hover:text-foreground'"
+        >
+          含首字TPS
+        </button>
+        <button
+          @click="useTpsGen = true"
+          class="px-2.5 py-1 rounded text-xs font-medium transition-all"
+          :class="useTpsGen 
+            ? 'bg-white text-foreground shadow-sm' 
+            : 'text-muted-foreground hover:text-foreground'"
+        >
+          生成TPS
+        </button>
+      </div>
     </div>
 
     <!-- Model chips -->
@@ -74,6 +97,7 @@ interface ModelStat {
 }
 
 const selectedModels = ref<Set<string>>(new Set())
+const useTpsGen = ref(false) // false: tpsTotal (含首字), true: tpsGen (纯生成)
 
 // 计算每个模型的统计数据
 const modelStats = computed<ModelStat[]>(() => {
@@ -113,22 +137,36 @@ const modelStats = computed<ModelStat[]>(() => {
     }
 
     stat.calls++
-    // 使用含首字的 TPS（tpsTotal），防止非流式或极端极小间隔导致纯生成 TPS 被撑大
+    // 根据用户选择使用不同的 TPS
     {
       const out = d.outputTokens || 0
       const dur = d.durationMs
-      if (dur != null && dur > 0 && out > 0) {
-        // 统一采用含首字的整体耗时计算 TPS，这对于非流式或流式都更稳健逼真
-        const tps = out / (dur / 1000)
-        if (tps > 0) {
-          stat.sumTps += tps
-          stat.tpsCount++
+      const ttft = d.ttftMs
+      
+      let tps: number | null = null
+      
+      if (useTpsGen.value) {
+        // 使用生成TPS（纯生成速度）
+        if (dur != null && dur > 0 && out > 0) {
+          const tpsTotal = out / (dur / 1000)
+          const genMs = Math.max(1, dur - (ttft ?? 0))
+          tps = genMs < 2000 ? tpsTotal : out / (genMs / 1000)
+        } else if (d.tpsGen && d.tpsGen > 0) {
+          tps = d.tpsGen
         }
-      } else if (d.tpsTotal && d.tpsTotal > 0) {
-        stat.sumTps += d.tpsTotal
-        stat.tpsCount++
-      } else if (d.tps && d.tps > 0) {
-        stat.sumTps += d.tps
+      } else {
+        // 使用含首字TPS（总体速度）
+        if (dur != null && dur > 0 && out > 0) {
+          tps = out / (dur / 1000)
+        } else if (d.tpsTotal && d.tpsTotal > 0) {
+          tps = d.tpsTotal
+        } else if (d.tps && d.tps > 0) {
+          tps = d.tps
+        }
+      }
+      
+      if (tps != null && tps > 0) {
+        stat.sumTps += tps
         stat.tpsCount++
       }
     }
@@ -260,8 +298,9 @@ function fmtSec(ms: number): string {
 const option = computed(() => {
   const selected = modelStats.value.filter(m => selectedModels.value.has(m.key))
 
+  const tpsLabel = useTpsGen.value ? '生成速度' : '总体速度'
   const dimensions = [
-    { name: '生成速度', unit: 'TPS' },
+    { name: tpsLabel, unit: 'TPS' },
     { name: '首字响应', unit: 's' },
     { name: '完成速度', unit: 's' },
     { name: '缓存命中', unit: '%' },
@@ -279,8 +318,9 @@ const option = computed(() => {
       textStyle: { color: '#334155', fontSize: 12 },
       formatter: (params: any) => {
         const model = params.data.raw as ModelStat
+        const tpsLabel = useTpsGen.value ? '生成速度' : '总体速度(含首字)'
         const rows = [
-          ['生成速度', model.avgTps > 0 ? `${model.avgTps.toFixed(1)} TPS` : '—'],
+          [tpsLabel, model.avgTps > 0 ? `${model.avgTps.toFixed(1)} TPS` : '—'],
           ['首字延迟', model.avgTtft > 0 ? fmtSec(model.avgTtft) : '—'],
           ['平均耗时', model.avgDuration > 0 ? fmtSec(model.avgDuration) : '—'],
           ['缓存命中率', `${model.hitRate.toFixed(1)}%`],
