@@ -1,3 +1,4 @@
+mod auth;
 mod config;
 mod db;
 
@@ -113,6 +114,26 @@ fn delete_llm_call(id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_auth_config() -> auth::AuthConfig {
+    auth::get_config()
+}
+
+#[tauri::command]
+fn save_auth_config(config: auth::AuthConfig) -> Result<auth::AuthStatus, String> {
+    auth::save_config(&config)
+}
+
+#[tauri::command]
+fn get_auth_status() -> auth::AuthStatus {
+    auth::get_status()
+}
+
+#[tauri::command]
+fn update_auth_status(status: String, message: String) -> Result<auth::AuthStatus, String> {
+    auth::update_status(status, message)
+}
+
+#[tauri::command]
 fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -145,6 +166,10 @@ pub fn run() {
             delete_provider_group,
             find_group_by_provider,
             delete_llm_call,
+            get_auth_config,
+            save_auth_config,
+            get_auth_status,
+            update_auth_status,
             show_main_window
         ])
         .setup(|app| {

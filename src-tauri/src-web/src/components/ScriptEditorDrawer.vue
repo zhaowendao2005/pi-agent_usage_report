@@ -14,7 +14,7 @@
       <!-- Header -->
       <div class="flex items-center justify-between px-6 py-4 border-b border-border">
         <div>
-          <h3 class="text-base font-semibold text-foreground">价格校准脚本</h3>
+          <h3 class="text-base font-semibold text-foreground">配置</h3>
           <p class="text-xs text-muted-foreground mt-0.5">
             编辑 <span class="font-mono">{{ provider }}</span> 的自定义脚本
           </p>

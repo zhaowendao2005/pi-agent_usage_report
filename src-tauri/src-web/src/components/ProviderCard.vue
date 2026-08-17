@@ -103,7 +103,7 @@
       >
         <FileCode2Icon v-if="hasScript" class="w-3.5 h-3.5 shrink-0" />
         <PlusIcon v-else class="w-3.5 h-3.5 shrink-0" />
-        {{ hasScript ? '编辑脚本' : '添加脚本' }}
+        配置
       </button>
       <button
         type="button"
