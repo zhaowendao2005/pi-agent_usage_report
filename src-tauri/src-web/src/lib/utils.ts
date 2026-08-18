@@ -35,8 +35,46 @@ export function fmtSec(ms: number | null | undefined): string {
 }
 
 /**
- * 前端重算 TPS（兼容库内旧公式把 input 算进去的数据）
- * 仅 output；含首字用全程 duration。
+ * 官方标准模型价格字典（单位：美元 / 1M Tokens）
+ * 当上游 API (如 OAuth / 免计费订阅) 返回 cost = 0 时，用于估算等效市场费用
+ */
+export function estimateCostMicroUsd(
+  _provider: string | null,
+  model: string,
+  input: number,
+  output: number,
+  cacheRead: number,
+  cacheWrite: number,
+): number {
+  const m = (model || '').toLowerCase()
+  let inP = 1.0, outP = 3.0, crP = 0.25, cwP = 1.25
+
+  if (m.includes('haiku')) {
+    inP = 0.8; outP = 4.0; crP = 0.08; cwP = 1.0
+  } else if (m.includes('opus')) {
+    inP = 15.0; outP = 75.0; crP = 1.5; cwP = 18.75
+  } else if (m.includes('sonnet') || m.includes('claude')) {
+    inP = 3.0; outP = 15.0; crP = 0.3; cwP = 3.75
+  } else if (m.includes('flash') || m.includes('gemini')) {
+    inP = 0.10; outP = 0.40; crP = 0.025; cwP = 0.10
+  } else if (m.includes('gpt-4o-mini') || m.includes('mini')) {
+    inP = 0.15; outP = 0.60; crP = 0.075; cwP = 0.15
+  } else if (m.includes('gpt-4o') || m.includes('gpt-5') || m.includes('codex') || m.includes('sol') || m.includes('terra')) {
+    inP = 2.50; outP = 10.0; crP = 1.25; cwP = 2.50
+  } else if (m.includes('deepseek')) {
+    inP = 0.14; outP = 0.28; crP = 0.014; cwP = 0.14
+  } else if (m.includes('grok')) {
+    inP = 2.00; outP = 10.0; crP = 0.50; cwP = 2.00
+  }
+
+  const usd = (input * inP + output * outP + cacheRead * crP + cacheWrite * cwP) / 1_000_000
+  return Math.round(usd * 1_000_000)
+}
+
+/**
+ * 前端重算 TPS（采用 RMT-TPS 鲁棒单点计算模型）
+ * 仅 output；含首字用全程 duration；纯生成剔除 TTFT。
+ * 加设 150ms / 3 token 门控与 [0.1, 800] 物理截断，防止除零与极小时间分母爆炸。
  */
 export function recomputeTps(point: {
   outputTokens: number
@@ -47,17 +85,118 @@ export function recomputeTps(point: {
   tps?: number
 }): { tpsTotal: number; tpsGen: number } {
   const out = point.outputTokens || 0
-  const dur = point.durationMs
+  let dur = point.durationMs
+  let ttft = point.ttftMs
+
+  // 防御性耗时修复：极小耗时反推物理合理值
+  if (dur != null && dur < 100 && out > 0) {
+    dur = Math.max(200, Math.round((out / 45) * 1000))
+  }
+  if (dur != null && dur > 300 && (ttft == null || ttft <= 0)) {
+    ttft = Math.round(dur * 0.3)
+  }
+
   if (dur != null && dur > 0 && out > 0) {
-    const tpsTotal = out / (dur / 1000)
-    const genMs = Math.max(1, dur - (point.ttftMs ?? 0))
-    const tpsGen = genMs < 2000 ? tpsTotal : out / (genMs / 1000)
+    const rawTotal = out / (dur / 1000)
+    const tpsTotal = Math.min(Math.max(rawTotal, 0.1), 800)
+
+    const genMs = Math.max(1, dur - (ttft ?? 0))
+    let tpsGen: number
+    if (genMs < 150 || out < 3) {
+      tpsGen = dur < 150 ? tpsTotal : Math.min(out / (dur / 1000), 800)
+    } else {
+      const rawGen = out / (genMs / 1000)
+      tpsGen = Math.min(Math.max(rawGen, 0.1), 800)
+    }
     return { tpsTotal, tpsGen }
   }
+  const fallbackTotal = point.tpsTotal ?? point.tps ?? 0
+  const fallbackGen = point.tpsGen ?? point.tps ?? 0
   return {
-    tpsTotal: point.tpsTotal ?? point.tps ?? 0,
-    tpsGen: point.tpsGen ?? point.tps ?? 0,
+    tpsTotal: fallbackTotal > 0 ? Math.min(Math.max(fallbackTotal, 0.1), 800) : 0,
+    tpsGen: fallbackGen > 0 ? Math.min(Math.max(fallbackGen, 0.1), 800) : 0,
   }
+}
+
+/**
+ * 分位数计算函数（线性插值法）
+ */
+export function quantile(arr: number[], q: number): number {
+  if (arr.length === 0) return 0
+  const sorted = [...arr].sort((a, b) => a - b)
+  const pos = (sorted.length - 1) * Math.max(0, Math.min(1, q))
+  const base = Math.floor(pos)
+  const rest = pos - base
+  if (sorted[base + 1] !== undefined) {
+    return sorted[base] + rest * (sorted[base + 1] - sorted[base])
+  }
+  return sorted[base]
+}
+
+/**
+ * 鲁棒雷达图维度打分模型
+ * @param values 各模型的维度原始值
+ * @param calls 各模型的样本量（用于贝叶斯收缩）
+ * @param good 方向：'high' 为越大越好，'low' 为越小越好
+ * @param options 配置：priorWeightK (贝叶斯先验权重), minScore (最低分, 默认 20), maxScore (最高分, 默认 95)
+ */
+export function computeRobustRadarScores(
+  values: number[],
+  calls: number[],
+  good: 'high' | 'low',
+  options: { priorWeightK?: number; minScore?: number; maxScore?: number } = {},
+): number[] {
+  const n = values.length
+  if (n === 0) return []
+  const { priorWeightK = 4, minScore = 20, maxScore = 95 } = options
+
+  // 1. 过滤有效值并计算基准（加权均值）
+  const validIndices = values.map((v, i) => (v > 0 ? i : -1)).filter(i => i >= 0)
+  if (validIndices.length === 0) {
+    return values.map(() => 50)
+  }
+
+  const validVals = validIndices.map(i => values[i])
+  const totalCalls = validIndices.reduce((acc, i) => acc + (calls[i] || 1), 0)
+  const priorMean =
+    totalCalls > 0
+      ? validIndices.reduce((acc, i) => acc + values[i] * (calls[i] || 1), 0) / totalCalls
+      : quantile(validVals, 0.5)
+
+  // 2. 贝叶斯收缩：对低样本量模型向全局基准平滑靠拢
+  const shrunkValues = values.map((v, i) => {
+    if (v <= 0) return 0
+    const callCount = calls[i] || 1
+    const k = priorWeightK
+    return (callCount * v + k * priorMean) / (callCount + k)
+  })
+
+  const validShrunkVals = shrunkValues.filter(v => v > 0)
+  if (validShrunkVals.length === 0) return values.map(() => 50)
+
+  // 3. 计算鲁棒参考边界（5% ~ 95% Winsorized 分位数）
+  let qLow = quantile(validShrunkVals, validShrunkVals.length > 3 ? 0.05 : 0)
+  let qHigh = quantile(validShrunkVals, validShrunkVals.length > 3 ? 0.95 : 1)
+
+  if (qHigh <= qLow) {
+    qHigh = Math.max(...validShrunkVals)
+    qLow = Math.min(...validShrunkVals)
+  }
+
+  if (qHigh === qLow) {
+    return values.map(v => (v <= 0 ? 50 : 70))
+  }
+
+  // 4. 映射到 [minScore, maxScore] 打分空间
+  const scoreSpan = maxScore - minScore
+  return values.map((v, i) => {
+    if (v <= 0) return minScore
+    const shrunk = shrunkValues[i]
+    const clamped = Math.max(qLow, Math.min(qHigh, shrunk))
+    const ratio = (clamped - qLow) / (qHigh - qLow)
+    const normalized = good === 'high' ? ratio : 1 - ratio
+    return Math.round(minScore + normalized * scoreSpan)
+  })
 }
 
 export type TrendTooltipMode = 'all' | 'local'

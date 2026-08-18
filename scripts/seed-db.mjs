@@ -133,12 +133,17 @@ for (let i = 0; i < 80; i++) {
     duration = 800 + Math.round(Math.random() * 4000);
   }
   const cost = Math.round((input * 0.000003 + output * 0.000015 + cacheRead * 0.0000003) * 1e6);
-  const tokens = input + output;
-  const tpsTotal = duration > 0 && tokens > 0 ? tokens / (duration / 1000) : null;
-  const tpsGen =
-    duration > 0 && tokens > 0 && ttft != null
-      ? tokens / (Math.max(1, duration - ttft) / 1000)
-      : null;
+  let tpsTotal = null;
+  let tpsGen = null;
+  if (duration > 0 && output > 0) {
+    tpsTotal = Math.min(Math.max(output / (duration / 1000), 0.1), 800);
+    const genMs = Math.max(1, duration - (ttft ?? 0));
+    if (genMs < 150 || output < 3) {
+      tpsGen = duration < 150 ? tpsTotal : Math.min(output / (duration / 1000), 800);
+    } else {
+      tpsGen = Math.min(Math.max(output / (genMs / 1000), 0.1), 800);
+    }
+  }
   insert.run(
     sid,
     mid,

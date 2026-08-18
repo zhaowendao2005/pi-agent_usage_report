@@ -49,45 +49,46 @@ interface ModelScatterData {
   value: [number, number, number] // [tpsTotal, tpsGen, calls]
 }
 
-// 计算每个模型的平均TPS
+// 计算每个模型的加权平均TPS（采用 RMT-TPS 鲁棒模型）
 const modelData = computed<ModelScatterData[]>(() => {
   const map = new Map<
     string,
     {
       provider: string | null
       model: string
-      sumTpsTotal: number
-      sumTpsGen: number
-      countTotal: number
-      countGen: number
+      sumOutput: number
+      sumDurationSec: number
+      sumGenOutput: number
+      sumGenDurationSec: number
+      calls: number
     }
   >()
 
   for (const d of series.value) {
-    // 跳过无效数据
-    if (!d.outputTokens || d.outputTokens <= 0) continue
-    if (!d.durationMs || d.durationMs <= 0) continue
+    const out = d.outputTokens || 0
+    const dur = d.durationMs || 0
+    const ttft = d.ttftMs || 0
+    if (out <= 0 || dur <= 0) continue
 
     const key = `${d.provider ?? ''}::${d.model}`
     const stat = map.get(key) ?? {
       provider: d.provider,
       model: d.model,
-      sumTpsTotal: 0,
-      sumTpsGen: 0,
-      countTotal: 0,
-      countGen: 0,
+      sumOutput: 0,
+      sumDurationSec: 0,
+      sumGenOutput: 0,
+      sumGenDurationSec: 0,
+      calls: 0,
     }
 
-    const { tpsTotal, tpsGen } = recomputeTps(d)
+    stat.calls++
+    stat.sumOutput += out
+    stat.sumDurationSec += dur / 1000
 
-    if (tpsTotal > 0) {
-      stat.sumTpsTotal += tpsTotal
-      stat.countTotal++
-    }
-
-    if (tpsGen > 0) {
-      stat.sumTpsGen += tpsGen
-      stat.countGen++
+    const genMs = dur - ttft
+    if (out >= 3 && genMs >= 150) {
+      stat.sumGenOutput += out
+      stat.sumGenDurationSec += genMs / 1000
     }
 
     map.set(key, stat)
@@ -95,10 +96,12 @@ const modelData = computed<ModelScatterData[]>(() => {
 
   return Array.from(map.entries())
     .map(([key, stat], idx) => {
-      // 必须两个TPS都有数据才显示
-      if (stat.countTotal === 0 || stat.countGen === 0) return null
-      const avgTpsTotal = stat.sumTpsTotal / stat.countTotal
-      const avgTpsGen = stat.sumTpsGen / stat.countGen
+      if (stat.calls === 0 || stat.sumDurationSec === 0) return null
+      const avgTpsTotal = Math.min(stat.sumOutput / stat.sumDurationSec, 800)
+      const avgTpsGen =
+        stat.sumGenDurationSec > 0
+          ? Math.min(stat.sumGenOutput / stat.sumGenDurationSec, 800)
+          : avgTpsTotal
 
       const label = stat.provider
         ? `${stat.provider}/${shortModel(stat.model)}`
@@ -112,8 +115,8 @@ const modelData = computed<ModelScatterData[]>(() => {
         color: COLORS[idx % COLORS.length],
         avgTpsTotal,
         avgTpsGen,
-        calls: stat.countTotal,
-        value: [avgTpsTotal, avgTpsGen, stat.countTotal],
+        calls: stat.calls,
+        value: [avgTpsTotal, avgTpsGen, stat.calls],
       }
     })
     .filter((d): d is ModelScatterData => d !== null)
@@ -143,10 +146,10 @@ const option = computed(() => {
   // 计算坐标轴范围
   const allTpsTotal = data.map(d => d.avgTpsTotal)
   const allTpsGen = data.map(d => d.avgTpsGen)
-  const maxTpsTotal = Math.max(...allTpsTotal)
-  const maxTpsGen = Math.max(...allTpsGen)
+  const maxTpsTotal = Math.max(...allTpsTotal, 10)
+  const maxTpsGen = Math.max(...allTpsGen, 10)
   const maxValue = Math.max(maxTpsTotal, maxTpsGen)
-  const axisMax = Math.ceil(maxValue * 1.1)
+  const axisMax = Math.ceil(maxValue * 1.15)
 
   // 气泡大小范围
   const minCalls = Math.min(...data.map(d => d.calls))
@@ -171,9 +174,9 @@ const option = computed(() => {
         
         const header = `<div style="color:${item.color};font-weight:600;margin-bottom:6px">${item.label}</div>`
         const rows = [
-          ['含首字TPS', `${item.avgTpsTotal.toFixed(1)}`],
-          ['生成TPS', `${item.avgTpsGen.toFixed(1)}`],
-          ['速度提升', `+${diff.toFixed(1)} (+${diffPercent}%)`],
+          ['含首字加权TPS', `${item.avgTpsTotal.toFixed(1)}`],
+          ['生成加权TPS', `${item.avgTpsGen.toFixed(1)}`],
+          ['解码提速', `+${diff.toFixed(1)} (+${diffPercent}%)`],
           ['调用次数', `${item.calls.toLocaleString()}`],
         ]
         const content = rows

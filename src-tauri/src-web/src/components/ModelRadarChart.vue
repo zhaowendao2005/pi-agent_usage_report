@@ -70,8 +70,9 @@ import { RadarChart } from 'echarts/charts'
 import { TooltipComponent, LegendComponent } from 'echarts/components'
 import { storeToRefs } from 'pinia'
 import { useUsageStore } from '@/stores/usage'
+import { computeRobustRadarScores, estimateCostMicroUsd } from '@/lib/utils'
 
-const { series, modelUsage } = storeToRefs(useUsageStore())
+const { series } = storeToRefs(useUsageStore())
 
 use([CanvasRenderer, RadarChart, TooltipComponent, LegendComponent])
 
@@ -99,14 +100,16 @@ interface ModelStat {
 const selectedModels = ref<Set<string>>(new Set())
 const useTpsGen = ref(false) // false: tpsTotal (含首字), true: tpsGen (纯生成)
 
-// 计算每个模型的统计数据
+// 计算每个模型的统计数据（采用 RMT-TPS Token 加权与鲁棒聚合）
 const modelStats = computed<ModelStat[]>(() => {
   const map = new Map<string, {
     provider: string | null
     model: string
     calls: number
-    sumTps: number
-    tpsCount: number
+    sumOutputTokens: number
+    sumDurationSec: number
+    sumGenOutputTokens: number
+    sumGenDurationSec: number
     sumTtft: number
     ttftCount: number
     sumDuration: number
@@ -124,8 +127,10 @@ const modelStats = computed<ModelStat[]>(() => {
       provider: d.provider,
       model: d.model,
       calls: 0,
-      sumTps: 0,
-      tpsCount: 0,
+      sumOutputTokens: 0,
+      sumDurationSec: 0,
+      sumGenOutputTokens: 0,
+      sumGenDurationSec: 0,
       sumTtft: 0,
       ttftCount: 0,
       sumDuration: 0,
@@ -137,58 +142,59 @@ const modelStats = computed<ModelStat[]>(() => {
     }
 
     stat.calls++
-    // 根据用户选择使用不同的 TPS
-    {
-      const out = d.outputTokens || 0
-      const dur = d.durationMs
-      const ttft = d.ttftMs
-      
-      let tps: number | null = null
-      
-      if (useTpsGen.value) {
-        // 使用生成TPS（纯生成速度）
-        if (dur != null && dur > 0 && out > 0) {
-          const tpsTotal = out / (dur / 1000)
-          const genMs = Math.max(1, dur - (ttft ?? 0))
-          tps = genMs < 2000 ? tpsTotal : out / (genMs / 1000)
-        } else if (d.tpsGen && d.tpsGen > 0) {
-          tps = d.tpsGen
-        }
-      } else {
-        // 使用含首字TPS（总体速度）
-        if (dur != null && dur > 0 && out > 0) {
-          tps = out / (dur / 1000)
-        } else if (d.tpsTotal && d.tpsTotal > 0) {
-          tps = d.tpsTotal
-        } else if (d.tps && d.tps > 0) {
-          tps = d.tps
-        }
-      }
-      
-      if (tps != null && tps > 0) {
-        stat.sumTps += tps
-        stat.tpsCount++
+    const out = d.outputTokens || 0
+    let dur = d.durationMs || 0
+    let ttft = d.ttftMs || 0
+
+    // 防御性校准：极小耗时与缺失 TTFT 修复
+    if (out > 0 && dur < 100) {
+      dur = Math.max(200, Math.round((out / 45) * 1000))
+    }
+    if (ttft <= 0 && dur > 300) {
+      ttft = Math.round(dur * 0.3)
+    }
+
+    if (dur > 0 && out > 0) {
+      stat.sumOutputTokens += out
+      stat.sumDurationSec += dur / 1000
+
+      const genMs = dur - ttft
+      // 门控：输出 >= 3 tokens 且生成时长 >= 150ms 才纳入纯生成统计
+      if (out >= 3 && genMs >= 150) {
+        stat.sumGenOutputTokens += out
+        stat.sumGenDurationSec += genMs / 1000
       }
     }
-    if (d.ttftMs != null && d.ttftMs > 0) {
-      stat.sumTtft += d.ttftMs
+
+    if (ttft > 0) {
+      stat.sumTtft += ttft
       stat.ttftCount++
     }
-    if (d.durationMs != null && d.durationMs > 0) {
-      stat.sumDuration += d.durationMs
+    if (dur > 0) {
+      stat.sumDuration += dur
       stat.durationCount++
     }
     stat.totalTokens += d.inputTokens + d.outputTokens + d.cacheRead + d.cacheWrite
     stat.cacheRead += d.cacheRead
     stat.inputTokens += d.inputTokens
-    stat.cost += d.totalCost
+
+    let cost = d.totalCost
+    if (cost <= 0 && (d.inputTokens > 0 || out > 0)) {
+      cost = estimateCostMicroUsd(d.provider, d.model, d.inputTokens, out, d.cacheRead, d.cacheWrite) / 1_000_000
+    }
+    stat.cost += cost
 
     map.set(key, stat)
   }
 
-  // 转换为 ModelStat
+  // 转换为 ModelStat（使用 Token 加权吞吐）
   const stats: ModelStat[] = Array.from(map.entries()).map(([key, stat], idx) => {
-    const avgTps = stat.tpsCount > 0 ? stat.sumTps / stat.tpsCount : 0
+    const weightedTpsTotal = stat.sumDurationSec > 0 ? Math.min(stat.sumOutputTokens / stat.sumDurationSec, 800) : 0
+    const weightedTpsGen = stat.sumGenDurationSec > 0 
+      ? Math.min(stat.sumGenOutputTokens / stat.sumGenDurationSec, 800) 
+      : weightedTpsTotal
+    
+    const avgTps = useTpsGen.value ? weightedTpsGen : weightedTpsTotal
     const avgTtft = stat.ttftCount > 0 ? stat.sumTtft / stat.ttftCount : 0
     const avgDuration = stat.durationCount > 0 ? stat.sumDuration / stat.durationCount : 0
     const hitRate = stat.inputTokens + stat.cacheRead > 0
@@ -217,9 +223,10 @@ const modelStats = computed<ModelStat[]>(() => {
     }
   }).sort((a, b) => b.calls - a.calls)
 
-  // 归一化计算分数
+  // 鲁棒归一化计算六维分数（贝叶斯收缩 + 鲁棒分位数打分）
   if (stats.length > 0) {
-    const dimensions = [
+    const callsList = stats.map(s => s.calls)
+    const dimensions: Array<{ values: number[]; good: 'high' | 'low' }> = [
       { values: stats.map(s => s.avgTps), good: 'high' },
       { values: stats.map(s => s.avgTtft), good: 'low' },
       { values: stats.map(s => s.avgDuration), good: 'low' },
@@ -229,30 +236,9 @@ const modelStats = computed<ModelStat[]>(() => {
     ]
 
     dimensions.forEach((dim, dimIdx) => {
-      const vals = dim.values.filter(v => v > 0)
-      if (vals.length === 0) {
-        stats.forEach(s => s.scores[dimIdx] = 50)
-        return
-      }
-
-      const min = Math.min(...vals)
-      const max = Math.max(...vals)
-      
-      if (max === min) {
-        stats.forEach(s => s.scores[dimIdx] = 80)
-        return
-      }
-
+      const dimScores = computeRobustRadarScores(dim.values, callsList, dim.good)
       stats.forEach((s, i) => {
-        const v = dim.values[i]
-        if (v <= 0) {
-          s.scores[dimIdx] = 50
-          return
-        }
-        const normalized = (v - min) / (max - min)
-        s.scores[dimIdx] = Math.round(
-          (dim.good === 'high' ? normalized : (1 - normalized)) * 85 + 15
-        )
+        s.scores[dimIdx] = dimScores[i]
       })
     })
   }

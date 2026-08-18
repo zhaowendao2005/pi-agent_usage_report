@@ -71,6 +71,10 @@ function aggregateChunk(chunk: TokenDataPoint[]): AggregatedPoint {
 
   let sumTpsTotal = 0
   let sumTpsGen = 0
+  let sumDurSec = 0
+  let sumOutputTokens = 0
+  let sumGenDurSec = 0
+  let sumGenOutputTokens = 0
   let maxTpsTotal = 0
   let maxTpsGen = 0
 
@@ -86,8 +90,12 @@ function aggregateChunk(chunk: TokenDataPoint[]): AggregatedPoint {
 
   for (let i = 0; i < count; i++) {
     const p = chunk[i]
+    const out = p.outputTokens || 0
+    const dur = p.durationMs || 0
+    const ttft = p.ttftMs || 0
+
     totalInput += p.inputTokens || 0
-    totalOutput += p.outputTokens || 0
+    totalOutput += out
     totalCacheRead += p.cacheRead || 0
     totalCacheWrite += p.cacheWrite || 0
     totalCost += p.totalCost || 0
@@ -98,6 +106,17 @@ function aggregateChunk(chunk: TokenDataPoint[]): AggregatedPoint {
     sumTpsGen += tps.tpsGen
     if (tps.tpsTotal > maxTpsTotal) maxTpsTotal = tps.tpsTotal
     if (tps.tpsGen > maxTpsGen) maxTpsGen = tps.tpsGen
+
+    if (dur > 0 && out > 0) {
+      sumOutputTokens += out
+      sumDurSec += dur / 1000
+
+      const genMs = dur - ttft
+      if (out >= 3 && genMs >= 150) {
+        sumGenOutputTokens += out
+        sumGenDurSec += genMs / 1000
+      }
+    }
 
     if (p.durationMs != null && p.durationMs > 0) {
       validDurationSum += p.durationMs
@@ -122,8 +141,9 @@ function aggregateChunk(chunk: TokenDataPoint[]): AggregatedPoint {
       ? modelList[0] || 'mixed'
       : `${modelList[0]} 等 ${modelList.length} 个模型`
 
-  const avgTpsTotal = count > 0 ? sumTpsTotal / count : 0
-  const avgTpsGen = count > 0 ? sumTpsGen / count : 0
+  // 采用 Token 加权吞吐作为分桶聚合 TPS（免疫短文本奇异点）
+  const weightedTpsTotal = sumDurSec > 0 ? Math.min(sumOutputTokens / sumDurSec, 800) : (count > 0 ? sumTpsTotal / count : 0)
+  const weightedTpsGen = sumGenDurSec > 0 ? Math.min(sumGenOutputTokens / sumGenDurSec, 800) : weightedTpsTotal
   const avgDuration = validDurationCount > 0 ? validDurationSum / validDurationCount : null
   const avgTtft = validTtftCount > 0 ? validTtftSum / validTtftCount : null
 
@@ -140,8 +160,8 @@ function aggregateChunk(chunk: TokenDataPoint[]): AggregatedPoint {
     outputTokens: totalOutput,
     cacheRead: totalCacheRead,
     cacheWrite: totalCacheWrite,
-    tpsTotal: +avgTpsTotal.toFixed(2),
-    tpsGen: +avgTpsGen.toFixed(2),
+    tpsTotal: +weightedTpsTotal.toFixed(2),
+    tpsGen: +weightedTpsGen.toFixed(2),
     tps: +avgTpsGen.toFixed(2),
     maxTpsTotal: +maxTpsTotal.toFixed(2),
     maxTpsGen: +maxTpsGen.toFixed(2),

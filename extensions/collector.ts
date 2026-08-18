@@ -26,22 +26,64 @@ function microUsd(costTotal: number | undefined | null): number {
 }
 
 /**
+ * 官方标准模型价格字典（单位：美元 / 1M Tokens）
+ * [input, output, cacheRead, cacheWrite]
+ * 当上游 API (如 OAuth / 免计费代理) 返回 cost = 0 时，自动回填等效市场估价
+ */
+function estimateCostMicroUsd(
+  _provider: string | null,
+  model: string,
+  input: number,
+  output: number,
+  cacheRead: number,
+  cacheWrite: number,
+): number {
+  const m = (model || "").toLowerCase();
+  let inP = 1.0, outP = 3.0, crP = 0.25, cwP = 1.25;
+
+  if (m.includes("haiku")) {
+    inP = 0.8; outP = 4.0; crP = 0.08; cwP = 1.0;
+  } else if (m.includes("opus")) {
+    inP = 15.0; outP = 75.0; crP = 1.5; cwP = 18.75;
+  } else if (m.includes("sonnet") || m.includes("claude")) {
+    inP = 3.0; outP = 15.0; crP = 0.3; cwP = 3.75;
+  } else if (m.includes("flash") || m.includes("gemini")) {
+    inP = 0.10; outP = 0.40; crP = 0.025; cwP = 0.10;
+  } else if (m.includes("gpt-4o-mini") || m.includes("mini")) {
+    inP = 0.15; outP = 0.60; crP = 0.075; cwP = 0.15;
+  } else if (m.includes("gpt-4o") || m.includes("gpt-5") || m.includes("codex") || m.includes("sol") || m.includes("terra")) {
+    inP = 2.50; outP = 10.0; crP = 1.25; cwP = 2.50;
+  } else if (m.includes("deepseek")) {
+    inP = 0.14; outP = 0.28; crP = 0.014; cwP = 0.14;
+  } else if (m.includes("grok")) {
+    inP = 2.00; outP = 10.0; crP = 0.50; cwP = 2.00;
+  }
+
+  const usd = (input * inP + output * outP + cacheRead * crP + cacheWrite * cwP) / 1_000_000;
+  return Math.round(usd * 1_000_000);
+}
+
+/**
  * TPS 仅按「输出 token」计算（不含 input / cache）。
- * - tpsTotal（含首字）：output / 全程 duration（含 TTFT）
+ * 采用 RMT-TPS 鲁棒模型：
+ * - tpsTotal（含首字）：output / 全程 duration（含 TTFT），物理范围 [0.1, 800]
  * - tpsGen（纯生成）：output / (duration - ttft)
- *   当生成时长 < 2s 时视作非流式，tpsGen = tpsTotal
+ *   当生成时长 < 150ms 或 output < 3 时视作非流式/微小样本，回退到 tpsTotal
  */
 function computeTps(_input: number, output: number, durationMs: number | null, ttftMs: number | null) {
   let tpsTotal: number | null = null;
   let tpsGen: number | null = null;
   if (durationMs != null && durationMs > 0 && output > 0) {
-    tpsTotal = output / (durationMs / 1000);
+    const rawTotal = output / (durationMs / 1000);
+    tpsTotal = Math.min(Math.max(rawTotal, 0.1), 800);
+
     const genMs = Math.max(1, durationMs - (ttftMs ?? 0));
-    // 生成时长 < 2s 视作非流式，直接用 tpsTotal
-    if (genMs < 2000) {
-      tpsGen = tpsTotal;
+    // 生成时长 < 150ms 或 output < 3 视作非流式/微小样本，回退到 tpsTotal
+    if (genMs < 150 || output < 3) {
+      tpsGen = durationMs < 150 ? tpsTotal : Math.min(output / (durationMs / 1000), 800);
     } else {
-      tpsGen = output / (genMs / 1000);
+      const rawGen = output / (genMs / 1000);
+      tpsGen = Math.min(Math.max(rawGen, 0.1), 800);
     }
   }
   return { tpsTotal, tpsGen };
@@ -84,11 +126,17 @@ function resolveHttpStatus(explicit: number | null, errorMessage: string | null)
   return Number.isFinite(n) ? n : null;
 }
 
-function isTextDeltaEvent(ev: any): boolean {
+function isAnyStreamDelta(ev: any): boolean {
   if (!ev) return false;
-  // assistantMessageEvent shapes vary; accept common ones
-  const t = ev.type ?? ev.event?.type;
-  return t === "text_delta" || t === "text_start" || t === "content_block_delta";
+  const t = String(ev.type ?? ev.event?.type ?? "").toLowerCase();
+  return (
+    t.includes("delta") ||
+    t.includes("start") ||
+    t.includes("chunk") ||
+    t === "thought" ||
+    t === "thinking" ||
+    t === "text"
+  );
 }
 
 function emptyPendingTurn(): PendingTurn {
@@ -122,6 +170,13 @@ export class UsageCollector {
 
     pi.on("turn_start", async () => {
       this.resetTurn();
+      this.turn.t0 = Date.now();
+    });
+
+    pi.on("context", async () => {
+      if (this.turn.t0 == null) {
+        this.turn.t0 = Date.now();
+      }
     });
 
     pi.on("before_provider_request", async () => {
@@ -142,21 +197,27 @@ export class UsageCollector {
       }
     });
 
+    pi.on("message_start", async (event) => {
+      const msg = (event as any).message;
+      if (msg?.role && msg.role !== "assistant") return;
+      if (this.turn.t0 == null) {
+        this.turn.t0 = Date.now();
+      }
+    });
+
     pi.on("message_update", async (event) => {
       if (this.turn.firstDeltaSeen) return;
       const msg = (event as any).message;
       if (msg?.role && msg.role !== "assistant") return;
       const ame = (event as any).assistantMessageEvent;
-      // Accept first streaming update as first-token signal if typed delta, or any update when t0 exists
-      if (ame && !isTextDeltaEvent(ame) && ame.type && ame.type !== "text_delta" && ame.type !== "text_start") {
-        // still allow unknown shapes after t0
+      if (ame && !isAnyStreamDelta(ame)) {
         if (!this.turn.t0) return;
       }
+      const now = Date.now();
       if (this.turn.t0 == null) {
-        // stream started without before_provider_request — approximate
-        this.turn.t0 = Date.now();
+        this.turn.t0 = now - 50;
       }
-      this.turn.ttftMs = Math.max(0, Date.now() - this.turn.t0);
+      this.turn.ttftMs = Math.max(10, now - this.turn.t0);
       this.turn.firstDeltaSeen = true;
     });
 
@@ -180,14 +241,37 @@ export class UsageCollector {
       this.refreshSession(ctx);
 
       const finishedAt = Date.now();
-      const startedAt = this.turn.t0 ?? message.timestamp ?? finishedAt;
-      const durationMs = Math.max(0, finishedAt - startedAt);
-      const ttftMs = this.turn.ttftMs;
+      let startedAt = this.turn.t0 ?? message.timestamp ?? finishedAt;
+      let durationMs = Math.max(0, finishedAt - startedAt);
       const inputTokens = Number(usage?.input ?? 0) || 0;
       const outputTokens = Number(usage?.output ?? 0) || 0;
       const cacheRead = Number(usage?.cacheRead ?? 0) || 0;
       const cacheWrite = Number(usage?.cacheWrite ?? 0) || 0;
-      const costUsd = microUsd(usage?.cost?.total);
+
+      // 物理保底防护：当有 outputTokens 时，若耗时异常过小 (<100ms) 则估算合理物理时间
+      if (outputTokens > 0 && durationMs < 100) {
+        durationMs = Math.max(200, Math.round((outputTokens / 45) * 1000));
+        startedAt = finishedAt - durationMs;
+      }
+
+      let ttftMs = this.turn.ttftMs;
+      if (ttftMs != null && ttftMs >= durationMs && outputTokens > 0) {
+        ttftMs = Math.max(50, Math.round(durationMs * 0.3));
+      }
+
+      let costUsd = microUsd(usage?.cost?.total);
+      // OAuth 零成本回填
+      if (costUsd === 0 && (inputTokens > 0 || outputTokens > 0)) {
+        costUsd = estimateCostMicroUsd(
+          normalizeProvider(message.provider),
+          String(message.model ?? "unknown"),
+          inputTokens,
+          outputTokens,
+          cacheRead,
+          cacheWrite
+        );
+      }
+
       const { tpsTotal, tpsGen } =
         inputTokens + outputTokens > 0
           ? computeTps(inputTokens, outputTokens, durationMs, ttftMs)

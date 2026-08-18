@@ -18,6 +18,7 @@
     "build:web": "npm --prefix src-tauri/src-web run build",
     "dev": "npx tauri dev",
     "seed": "node scripts/seed-db.mjs",
+    "calibrate": "node scripts/calibrate-existing-db.mjs",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
