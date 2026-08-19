@@ -14,13 +14,13 @@ import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { SunburstChart } from 'echarts/charts'
-import { TooltipComponent } from 'echarts/components'
+import { TooltipComponent, TitleComponent } from 'echarts/components'
 import { storeToRefs } from 'pinia'
 import { useUsageStore } from '@/stores/usage'
 
 const { series } = storeToRefs(useUsageStore())
 
-use([CanvasRenderer, SunburstChart, TooltipComponent])
+use([CanvasRenderer, SunburstChart, TooltipComponent, TitleComponent])
 
 const option = computed(() => {
   // 按提供商 → 错误类型分组

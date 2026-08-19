@@ -7,6 +7,7 @@ import {
   TooltipComponent,
   LegendComponent,
   MarkLineComponent,
+  TitleComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import VChart from 'vue-echarts'
@@ -20,6 +21,7 @@ use([
   TooltipComponent,
   LegendComponent,
   MarkLineComponent,
+  TitleComponent,
   CanvasRenderer,
 ])
 

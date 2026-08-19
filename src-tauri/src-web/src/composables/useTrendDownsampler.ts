@@ -162,7 +162,7 @@ function aggregateChunk(chunk: TokenDataPoint[]): AggregatedPoint {
     cacheWrite: totalCacheWrite,
     tpsTotal: +weightedTpsTotal.toFixed(2),
     tpsGen: +weightedTpsGen.toFixed(2),
-    tps: +avgTpsGen.toFixed(2),
+    tps: +weightedTpsGen.toFixed(2),
     maxTpsTotal: +maxTpsTotal.toFixed(2),
     maxTpsGen: +maxTpsGen.toFixed(2),
     totalCost: +totalCost.toFixed(6),
