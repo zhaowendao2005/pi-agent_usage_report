@@ -420,7 +420,7 @@ Agent: "开始首次全量同步..."
   → 获取第 2 页: 50 条记录
   ...
   ✓ 共同步 237 条记录
-  ✓ 已保存到 ~/.pi/agent/usage_fetched.db
+  ✓ 已保存到 ~/.pi/pi-usage-report-store/usage_fetched.db
 ```
 
 **步骤 6：增量同步（后续使用）**

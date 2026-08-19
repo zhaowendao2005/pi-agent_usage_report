@@ -1,4 +1,4 @@
-//! Read-only queries against ~/.pi/agent/usage.db
+//! Read-only queries against ~/.pi/pi-usage-report-store/usage.db
 
 use chrono::{Local, TimeZone};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -68,7 +68,9 @@ pub struct Health {
 
 pub fn db_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".pi").join("agent").join("usage.db")
+    home.join(".pi")
+        .join("pi-usage-report-store")
+        .join("usage.db")
 }
 
 fn open_ro() -> Result<Connection, String> {

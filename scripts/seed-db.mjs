@@ -1,5 +1,5 @@
 /**
- * Seed ~/.pi/agent/usage.db with sample rows for local dashboard testing.
+ * Seed ~/.pi/pi-usage-report-store/usage.db with sample rows for local dashboard testing.
  * Run: node scripts/seed-db.mjs
  */
 
@@ -8,7 +8,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
-const DB_PATH = join(homedir(), ".pi", "agent", "usage.db");
+const DB_PATH = join(homedir(), ".pi", "pi-usage-report-store", "usage.db");
 mkdirSync(dirname(DB_PATH), { recursive: true });
 
 const db = new DatabaseSync(DB_PATH);

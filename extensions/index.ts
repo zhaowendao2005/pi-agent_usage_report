@@ -1,7 +1,7 @@
 /**
  * usage-report — Pi extension
  *
- * Collects per-LLM-call token/cost/TTFT metrics into ~/.pi/agent/usage.db
+ * Collects per-LLM-call token/cost/TTFT metrics into ~/.pi/pi-usage-report-store/usage.db
  * and opens a live dashboard via /usage.
  */
 

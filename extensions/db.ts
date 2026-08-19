@@ -1,6 +1,6 @@
 /**
  * SQLite writer for usage metrics.
- * Path: ~/.pi/agent/usage.db
+ * Path: ~/.pi/pi-usage-report-store/usage.db
  * Runtime: Node 22.19+ node:sqlite (DatabaseSync)
  */
 
@@ -9,7 +9,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
-export const DB_PATH = join(homedir(), ".pi", "agent", "usage.db");
+export const DB_PATH = join(homedir(), ".pi", "pi-usage-report-store", "usage.db");
 
 export interface CallRow {
   messageId: string;

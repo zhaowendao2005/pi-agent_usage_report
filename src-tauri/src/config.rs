@@ -1,4 +1,4 @@
-//! UI preferences: ~/.pi/agent/usage_config.yaml
+//! UI preferences: ~/.pi/pi-usage-report-store/usage_config.yaml
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -50,7 +50,9 @@ impl Default for UsageUiConfig {
 
 pub fn config_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".pi").join("agent").join("usage_config.yaml")
+    home.join(".pi")
+        .join("pi-usage-report-store")
+        .join("usage_config.yaml")
 }
 
 pub fn load() -> UsageUiConfig {
@@ -74,7 +76,7 @@ pub fn save(cfg: &UsageUiConfig) -> Result<(), String> {
     let text = serde_yaml::to_string(cfg).map_err(|e| e.to_string())?;
     // Keep a short header comment for humans
     let body = format!(
-        "# Pi Usage Monitor UI preferences\n# Path: ~/.pi/agent/usage_config.yaml\n{}",
+        "# Pi Usage Monitor UI preferences\n# Path: ~/.pi/pi-usage-report-store/usage_config.yaml\n{}",
         text
     );
     fs::write(&path, body).map_err(|e| e.to_string())

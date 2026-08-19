@@ -180,15 +180,15 @@
           </div>
           <div class="flex items-center justify-between">
             <span>数据文件</span>
-            <span class="font-mono text-green-600">~/.pi/agent/usage.db</span>
+            <span class="font-mono text-green-600">~/.pi/pi-usage-report-store/usage.db</span>
           </div>
           <div class="flex items-center justify-between">
             <span>鉴权配置</span>
-            <span class="font-mono text-green-600">~/.pi/agent/auth.db</span>
+            <span class="font-mono text-green-600">~/.pi/pi-usage-report-store/auth.db</span>
           </div>
           <div class="flex items-center justify-between">
             <span>UI 配置</span>
-            <span class="font-mono text-green-600">~/.pi/agent/usage_config.yaml</span>
+            <span class="font-mono text-green-600">~/.pi/pi-usage-report-store/usage_config.yaml</span>
           </div>
           <div class="flex items-center justify-between">
             <span>壳</span>

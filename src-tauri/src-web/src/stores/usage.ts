@@ -50,7 +50,7 @@ export interface SummaryStats {
   errorCount: number
 }
 
-/** Persisted UI options → ~/.pi/agent/usage_config.yaml */
+/** Persisted UI options → ~/.pi/pi-usage-report-store/usage_config.yaml */
 export interface UsageUiConfig {
   time_preset: string
   end_is_live: boolean

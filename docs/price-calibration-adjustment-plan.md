@@ -83,7 +83,7 @@ CREATE TABLE provider_group_members (
 
 **参与组件**：
 - Tauri 应用的"价格校准"页
-- `~/.pi/agent/usage.db` - 数据库（新增表）
+- `~/.pi/pi-usage-report-store/usage.db` - 数据库（新增表）
 - `~/.pi/pi-usage-report-store/` - Adapter 存储位置
 
 **主要操作**：

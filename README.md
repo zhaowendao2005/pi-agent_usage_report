@@ -1,6 +1,6 @@
 # usage-report
 
-Pi 扩展：在多个终端同时跑 pi 时，采集每次 LLM 调用的 **token / 缓存 / 费用 / TTFT / TPS**，写入 `~/.pi/agent/usage.db`，并用 **Tauri 2** 桌面窗口做实时统计仪表盘。
+Pi 扩展：在多个终端同时跑 pi 时，采集每次 LLM 调用的 **token / 缓存 / 费用 / TTFT / TPS**，写入 `~/.pi/pi-usage-report-store/usage.db`，并用 **Tauri 2** 桌面窗口做实时统计仪表盘。
 
 ## 产物体积
 
@@ -55,7 +55,7 @@ dist/pi-usage-monitor.exe
 ```bash
 npm install && npm --prefix src-tauri/src-web install
 
-npm run seed    # 写入测试数据到 ~/.pi/agent/usage.db
+npm run seed    # 写入测试数据到 ~/.pi/pi-usage-report-store/usage.db
 npm run dev     # Tauri 开发模式（前端热更新）
 npm run build   # 发布构建 → dist/extensions（编译）+ dist/pi-usage-monitor.exe
 ```
@@ -64,11 +64,11 @@ npm run build   # 发布构建 → dist/extensions（编译）+ dist/pi-usage-mo
 
 ```
 多个 pi 终端
-  └─ extensions/ 采集 ──写入──► ~/.pi/agent/usage.db
+  └─ extensions/ 采集 ──写入──► ~/.pi/pi-usage-report-store/usage.db
                                       ▲ 只读
 Tauri 窗口（Rust invoke + 系统 WebView2）
   └─ 前端：src-tauri/src-web 构建进 src-tauri/web
-  └─ UI 选项：~/.pi/agent/usage_config.yaml
+  └─ UI 选项：~/.pi/pi-usage-report-store/usage_config.yaml
 ```
 
 | 组件 | 路径 | 运行时 |
@@ -76,8 +76,8 @@ Tauri 窗口（Rust invoke + 系统 WebView2）
 | 采集扩展 | `extensions/` | pi 进程内 Node（`node:sqlite`） |
 | 桌面壳 | `src-tauri/` | Tauri 2 + rusqlite |
 | 前端 | `src-tauri/src-web/` → `src-tauri/web` | Vue3 + Pinia + ECharts |
-| 数据库 | `~/.pi/agent/usage.db` | SQLite WAL |
-| UI 配置 | `~/.pi/agent/usage_config.yaml` | 统计页小选项持久化 |
+| 数据库 | `~/.pi/pi-usage-report-store/usage.db` | SQLite WAL |
+| UI 配置 | `~/.pi/pi-usage-report-store/usage_config.yaml` | 统计页小选项持久化 |
 
 默认 UI：时间范围 **过去 24h → 实时**，**LIVE 模式开启**。
 

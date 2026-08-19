@@ -1,6 +1,6 @@
 /**
- * Calibrate and clean historical data in ~/.pi/agent/usage.db
- * - Backs up ~/.pi/agent/usage.db before modifications
+ * Calibrate and clean historical data in ~/.pi/pi-usage-report-store/usage.db
+ * - Backs up ~/.pi/pi-usage-report-store/usage.db before modifications
  * - Fixes corrupted/microsecond durations for OAuth / buffered responses
  * - Calibrates zero-cost records with market equivalent pricing
  * - Recomputes tps_total and tps_gen with RMT-TPS robust model bounds
@@ -13,7 +13,7 @@ import { copyFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-const DB_PATH = join(homedir(), ".pi", "agent", "usage.db");
+const DB_PATH = join(homedir(), ".pi", "pi-usage-report-store", "usage.db");
 
 if (!existsSync(DB_PATH)) {
   console.error(`[Calibrate] Database not found at ${DB_PATH}`);

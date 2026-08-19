@@ -1,7 +1,7 @@
-//! Auth system persistence: ~/.pi/agent/auth.db
+//! Auth system persistence: ~/.pi/pi-usage-report-store/auth.db
 //!
 //! Stores 中转站地址 (relay URL) + Edge 登录态开关（手动控制）。
-//! EdgeBridge 就绪后，状态卡可直接探测 ~/.pi/agent/edge-bridge.json 获得真实连接信息。
+//! EdgeBridge 就绪后，状态卡可直接探测 ~/.pi/pi-usage-report-store/edge-bridge.json 获得真实连接信息。
 
 use chrono::Local;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -51,13 +51,17 @@ pub struct AuthStatus {
 
 pub fn db_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".pi").join("agent").join("auth.db")
+    home.join(".pi")
+        .join("pi-usage-report-store")
+        .join("auth.db")
 }
 
 /// EdgeBridge 状态文件（Phase 2 起由桥接进程写入）
 pub fn bridge_state_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".pi").join("agent").join("edge-bridge.json")
+    home.join(".pi")
+        .join("pi-usage-report-store")
+        .join("edge-bridge.json")
 }
 
 fn now_ms() -> i64 {
