@@ -78,21 +78,27 @@ function rollbackVersion() {
 /* ---------- 0) worktree check (version drift allowed) ---------- */
 
 function gitCheck() {
-  const r = run("git", ["status", "--porcelain"], { silent: true });
-  const lines = (r.stdout ?? "").trim().split("\n").filter(Boolean);
-  if (lines.length === 0) return;
+  // Parse changed paths without relying on porcelain column widths:
+  // worktree vs index, index vs HEAD, and untracked (ignore-rule aware).
+  const work = run("git", ["diff", "--name-only"], { silent: true }).stdout.split("\n").filter(Boolean);
+  const staged = run("git", ["diff", "--cached", "--name-only"], { silent: true }).stdout.split("\n").filter(Boolean);
+  const untracked = run("git", ["ls-files", "--others", "--exclude-standard"], { silent: true }).stdout.split("\n").filter(Boolean);
+  const all = [...new Set([...staged, ...work, ...untracked])].filter(Boolean);
+  if (all.length === 0) return;
 
-  const modified = lines.map((l) => l.slice(3).trim()).filter((p) => p && !p.startsWith('"'));
-  const onlyVersionFiles = modified.every((p) => p === "package.json" || p === "package-lock.json");
+  const onlyVersionFiles = all.every((p) => p === "package.json" || p === "package-lock.json");
   if (!onlyVersionFiles) {
     console.error("✗ working tree has non-version changes. Commit or stash them first:");
-    lines.forEach((l) => console.error("   " + l));
+    all.forEach((p) => console.error("   " + (staged.includes(p) ? "(staged) " : "") + (untracked.includes(p) ? "(untracked) " : "") + p));
     process.exit(1);
   }
 
   // Allow the drift only if the diff contains *just* version-number lines.
-  const d = run("git", ["diff", "--", "package.json", "package-lock.json"], { silent: true });
-  const changedLines = (d.stdout ?? "").split("\n").filter((l) => /^[+-]/.test(l) && !/^[+-]{3}/.test(l));
+  const d =
+    run("git", ["diff", "--", "package.json", "package-lock.json"], { silent: true }).stdout +
+    "\n" +
+    run("git", ["diff", "--cached", "--", "package.json", "package-lock.json"], { silent: true }).stdout;
+  const changedLines = d.split("\n").filter((l) => /^[+-]/.test(l) && !/^[+-]{3}/.test(l));
   const versionOnly = changedLines.every((l) => /^[+-]\s*"version":\s*"/.test(l));
   if (!versionOnly) {
     console.error("✗ package.json / package-lock.json contain non-version changes. Revert or commit them:");
@@ -100,7 +106,7 @@ function gitCheck() {
     process.exit(1);
   }
   prevVersion = versionOf(); // pick up the drifted version as the baseline (do not re-bump from HEAD)
-  console.log(`→ version drift detected (${versionOf()}), continuing; previous release will carry it forward`);
+  console.log(`→ version drift detected (${versionOf()}), continuing; release will carry it forward`);
 }
 
 /* ---------- 1) version bump ---------- */

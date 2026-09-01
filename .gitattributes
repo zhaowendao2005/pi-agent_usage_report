@@ -1,0 +1,29 @@
+# 统一 LF 行尾，避免 Windows core.autocrlf 导致 npm version 等工具
+# 修改文件后 git status 永远"脏"的抖动
+* text=auto
+
+# 文本文件全部强制 LF
+*.json text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.md text eol=lf
+*.vue text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.svg text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.rs text eol=lf
+*.lock text eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.exe binary
