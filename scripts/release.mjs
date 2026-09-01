@@ -2,22 +2,28 @@
 /**
  * Release pipeline for usage-report
  *
- * 0) Preconditions: clean git tree (no uncommitted changes)
+ * 0) Worktree check: any uncommitted change is allowed ONLY if it is a
+ *    version-number drift in package.json / package-lock.json (e.g. from a
+ *    previous interrupted release or a manual `npm version`). The drift is
+ *    picked up and committed at the end of the release. Any other change
+ *    aborts.
  * 1) Bump version: patch | minor | major (default patch)
  * 2) npm run build → fresh dist/
- * 3) npm pack --dry-run → enforce allowlist on tarball entries
- *    (any unexpected file aborts the release and reverts the version bump)
+ * 3) npm pack --dry-run → strict allowlist on tarball entries
  * 4) npm publish
- * 5) Commit version bump + create annotated tag v<version>
+ * 5) Commit version bump + annotated tag v<version>
+ *
+ * On any failure after the bump, the version edit is rolled back, so the
+ * working tree never stays "dirty" because of version changes alone.
  *
  * Usage:
- *   node scripts/release.mjs [patch|minor|major]      # full release
- *   node scripts/release.mjs patch --dry-run          # everything except publish/commit/tag
- *   node scripts/release.mjs --check-only             # only validate tarball allowlist
+ *   node scripts/release.mjs [patch|minor|major]       # full release
+ *   node scripts/release.mjs patch --dry-run           # everything except publish/commit/tag
+ *   node scripts/release.mjs --check-only              # only validate tarball allowlist
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform } from "node:os";
@@ -34,6 +40,8 @@ const checkOnly = args.includes("--check-only");
 
 console.log(`→ usage-report release [bump=${bump}${dryRun ? ", dry-run" : ""}${checkOnly ? ", check-only" : ""}]`);
 
+/* ---------- helpers ---------- */
+
 function run(cmd, argsList, opts = {}) {
   const r = spawnSync(cmd, argsList, {
     cwd: opts.cwd ?? root,
@@ -42,31 +50,70 @@ function run(cmd, argsList, opts = {}) {
     ...(opts.silent ? { stdio: "pipe" } : { stdio: "inherit" }),
   });
   if (r.error) throw r.error;
-  if (r.status !== 0 && !opts.allowFail) {
-    process.exit(r.status ?? 1);
+  if (r.status !== 0) {
+    const msg = `command failed (${r.status ?? "?"}): ${cmd} ${argsList.join(" ")}`;
+    if (opts.silent && r.stderr) throw new Error(msg + "\n" + r.stderr.trim().slice(0, 2000));
+    throw new Error(msg);
   }
   return r;
 }
 
-/* ---------- 0) clean tree ---------- */
-function gitClean() {
-  const r = run("git", ["status", "--porcelain"], { silent: true });
-  const lines = (r.stdout ?? "").trim().split("\n").filter(Boolean);
-  if (lines.length > 0) {
-    console.error("✗ git tree is not clean. Commit or stash first:\n" + lines.join("\n"));
-    process.exit(1);
+const versionOf = () => JSON.parse(readFileSync(pkgPath, "utf8")).version;
+let prevVersion = versionOf(); // version present before this run
+let bumped = false;
+let committed = false;
+
+function rollbackVersion() {
+  if (bumped && !committed) {
+    try {
+      run("git", ["checkout", "--", "package.json", "package-lock.json"], { silent: true });
+      console.log(`  ↺ reverted version bump to ${prevVersion}`);
+    } catch {
+      console.error("  ⚠ could not auto-revert version; run: git checkout -- package.json package-lock.json");
+    }
+    bumped = false;
   }
 }
 
+/* ---------- 0) worktree check (version drift allowed) ---------- */
+
+function gitCheck() {
+  const r = run("git", ["status", "--porcelain"], { silent: true });
+  const lines = (r.stdout ?? "").trim().split("\n").filter(Boolean);
+  if (lines.length === 0) return;
+
+  const modified = lines.map((l) => l.slice(3).trim()).filter((p) => p && !p.startsWith('"'));
+  const onlyVersionFiles = modified.every((p) => p === "package.json" || p === "package-lock.json");
+  if (!onlyVersionFiles) {
+    console.error("✗ working tree has non-version changes. Commit or stash them first:");
+    lines.forEach((l) => console.error("   " + l));
+    process.exit(1);
+  }
+
+  // Allow the drift only if the diff contains *just* version-number lines.
+  const d = run("git", ["diff", "--", "package.json", "package-lock.json"], { silent: true });
+  const changedLines = (d.stdout ?? "").split("\n").filter((l) => /^[+-]/.test(l) && !/^[+-]{3}/.test(l));
+  const versionOnly = changedLines.every((l) => /^[+-]\s*"version":\s*"/.test(l));
+  if (!versionOnly) {
+    console.error("✗ package.json / package-lock.json contain non-version changes. Revert or commit them:");
+    changedLines.slice(0, 20).forEach((l) => console.error("   " + l));
+    process.exit(1);
+  }
+  prevVersion = versionOf(); // pick up the drifted version as the baseline (do not re-bump from HEAD)
+  console.log(`→ version drift detected (${versionOf()}), continuing; previous release will carry it forward`);
+}
+
 /* ---------- 1) version bump ---------- */
-const prevVersion = JSON.parse(readFileSync(pkgPath, "utf8")).version;
+
 function bumpVersion() {
   if (dryRun || checkOnly) return;
-  console.log(`\n→ npm version ${bump} (${prevVersion} → next)`);
+  console.log(`\n→ npm version ${bump} (${versionOf()} → next)`);
   run(isWin ? "npm.cmd" : "npm", ["version", bump, "--no-git-tag-version"]);
+  bumped = true;
 }
 
 /* ---------- 2) build ---------- */
+
 function build() {
   if (dryRun || checkOnly) {
     console.log("\n→ (skip build) npm run build");
@@ -77,6 +124,7 @@ function build() {
 }
 
 /* ---------- 3) tarball allowlist ---------- */
+
 const ALLOW = [
   "package.json",
   "README.md",
@@ -92,22 +140,16 @@ function checkTarball() {
   try {
     data = JSON.parse(r.stdout);
   } catch {
-    console.error("✗ cannot parse npm pack output:\n" + (r.stdout ?? "").slice(0, 2000));
-    process.exit(1);
+    throw new Error("cannot parse npm pack output:\n" + (r.stdout ?? "").slice(0, 2000));
   }
   const files = (data[0]?.files ?? []).map((f) => f.path);
   const bad = files.filter((p) => !ALLOW.some((a) => (typeof a === "string" ? a === p : a.test(p))));
   if (bad.length > 0) {
-    console.error("✗ tarball contains unexpected files — release aborted:");
-    bad.forEach((p) => console.error("   " + p));
-    console.error("\n  Remove them from dist/ or adjust npm `files` whitelist.");
-    if (!dryRun && !checkOnly) {
-      console.error("  Reverting version bump...");
-      const v = JSON.parse(readFileSync(pkgPath, "utf8")).version;
-      run(isWin ? "git.exe" : "git", ["checkout", "--", "package.json", "package-lock.json"]);
-      console.error(`  reverted ${v} → ${prevVersion}`);
-    }
-    process.exit(1);
+    throw new Error(
+      "tarball contains unexpected files:\n  " +
+        bad.join("\n  ") +
+        "\nRemove them from dist/ or tighten npm `files`."
+    );
   }
   const bytes = data[0].unpackedSize ?? files.reduce((a, f) => a + (f.size ?? 0), 0);
   console.log(`✓ tarball OK: ${files.length} files, ${(bytes / 1024).toFixed(1)} KB`);
@@ -115,6 +157,7 @@ function checkTarball() {
 }
 
 /* ---------- 4) publish ---------- */
+
 function publish() {
   if (dryRun || checkOnly) return;
   console.log("\n→ npm publish");
@@ -122,22 +165,30 @@ function publish() {
 }
 
 /* ---------- 5) commit + tag ---------- */
-function tagAndCommit(version) {
+
+function tagAndCommit() {
   if (dryRun || checkOnly) return;
-  console.log(`\n→ git commit + tag v${version}`);
+  const v = versionOf();
+  console.log(`\n→ git commit + tag v${v}`);
   run("git", ["add", "package.json", "package-lock.json"]);
-  run("git", ["commit", "-m", `chore: version bump to v${version} (release)`]);
-  run("git", ["tag", "-a", `v${version}`, "-m", `usage-report v${version}`]);
-  console.log(`✓ tagged v${version} — don't forget: git push && git push --tags`);
+  run("git", ["commit", "-m", `chore: version bump to v${v} (release)`]);
+  committed = true;
+  run("git", ["tag", "-a", `v${v}`, "-m", `usage-report v${v}`]);
+  console.log(`✓ tagged v${v} — don't forget: git push && git push --tags`);
 }
 
 /* ---------- main ---------- */
-if (!checkOnly) gitClean();
-bumpVersion();
-build();
-checkTarball();
-publish();
-const finalVersion = JSON.parse(readFileSync(pkgPath, "utf8")).version;
-tagAndCommit(finalVersion);
 
-console.log("\n✅ done." + (dryRun ? " (dry-run: publish/commit/tag skipped)" : " — remember to push tags."));
+try {
+  if (!checkOnly) gitCheck();
+  bumpVersion();
+  build();
+  checkTarball();
+  publish();
+  tagAndCommit();
+  console.log("\n✅ done." + (dryRun ? " (dry-run: publish/commit/tag skipped)" : " — remember to push tags."));
+} catch (e) {
+  rollbackVersion();
+  console.error("\n✗ release aborted: " + e.message);
+  process.exit(1);
+}
