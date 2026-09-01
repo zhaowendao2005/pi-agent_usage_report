@@ -1,10 +1,17 @@
 {
   "name": "usage-report",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi extension: multi-instance token/cost/TTFT usage collector + Tauri dashboard",
   "type": "module",
   "license": "MIT",
-  "keywords": ["pi-package", "pi-extension", "usage", "token", "cost", "tauri"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "usage",
+    "token",
+    "cost",
+    "tauri"
+  ],
   "files": [
     "dist/extensions",
     "dist/BUILD_INFO.json",
@@ -12,7 +19,9 @@
     "README.md"
   ],
   "pi": {
-    "extensions": ["./dist/extensions"]
+    "extensions": [
+      "./dist/extensions"
+    ]
   },
   "scripts": {
     "build": "node scripts/build.mjs",
