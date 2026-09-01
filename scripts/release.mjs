@@ -37,6 +37,7 @@ const bumpTypes = ["patch", "minor", "major"];
 const bump = bumpTypes.find((t) => args.includes(t)) ?? "patch";
 const dryRun = args.includes("--dry-run");
 const checkOnly = args.includes("--check-only");
+const otpArg = args.find((a) => a.startsWith("--otp="))?.split("=")[1] ?? process.env.NPM_PUBLISH_OTP;
 
 console.log(`→ usage-report release [bump=${bump}${dryRun ? ", dry-run" : ""}${checkOnly ? ", check-only" : ""}]`);
 
@@ -166,8 +167,10 @@ function checkTarball() {
 
 function publish() {
   if (dryRun || checkOnly) return;
-  console.log("\n→ npm publish");
-  run(isWin ? "npm.cmd" : "npm", ["publish"]);
+  const p = ["publish"];
+  if (otpArg) p.push("--otp", otpArg);
+  console.log(`\n→ npm publish${otpArg ? " (with --otp)" : ""}`);
+  run(isWin ? "npm.cmd" : "npm", p);
 }
 
 /* ---------- 5) commit + tag ---------- */
