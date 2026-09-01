@@ -6,8 +6,9 @@
   "license": "MIT",
   "keywords": ["pi-package", "pi-extension", "usage", "token", "cost", "tauri"],
   "files": [
-    "dist",
-    "docs",
+    "dist/extensions",
+    "dist/BUILD_INFO.json",
+    "dist/pi-usage-monitor.exe",
     "README.md"
   ],
   "pi": {

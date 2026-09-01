@@ -9,3 +9,10 @@ src-tauri/gen/
 src-tauri/web/
 dist/
 *.exe
+*.tsbuildinfo
+
+# 本地个性化开发目录（skills/harness 等，不入库不发布）
+skills/
+temp/
+src-tauri/skills/
+docs/PROJECT_INTRO_OUTLINE.md
