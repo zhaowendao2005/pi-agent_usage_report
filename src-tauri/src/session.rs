@@ -484,8 +484,9 @@ fn build_node_summary(v: &Value, entry_type: &str) -> (String, String, Option<St
         }
     }
 
-    if summary.len() > 180 {
-        summary = format!("{}…", &summary[..179]);
+    if summary.chars().count() > 140 {
+        let truncated: String = summary.chars().take(139).collect();
+        summary = format!("{}…", truncated);
     }
 
     (summary, status, role, duration_ms, tokens, cost)
@@ -588,27 +589,27 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
         .cloned()
         .collect();
 
-    // Flatten tree with DFS to calculate depths and branch points
+    // Flatten tree iteratively to prevent stack overflow on deep session graphs
     let mut nodes: Vec<SessionTreeNode> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
 
-    fn traverse(
-        current_id: &str,
-        depth: usize,
-        is_branch: bool,
-        node_map: &HashMap<String, Value>,
-        children_map: &HashMap<Option<String>, Vec<String>>,
-        visited: &mut HashSet<String>,
-        nodes: &mut Vec<SessionTreeNode>,
-    ) {
-        if visited.contains(current_id) {
-            return;
-        }
-        visited.insert(current_id.to_string());
+    // Stack tuple: (node_id, indent_depth, is_branch_point)
+    let mut stack: Vec<(String, usize, bool)> = Vec::new();
 
-        let entry = match node_map.get(current_id) {
+    // Push roots in reverse order so first root is processed first
+    for root_id in root_ids.iter().rev() {
+        stack.push((root_id.clone(), 0, false));
+    }
+
+    while let Some((current_id, depth, is_branch)) = stack.pop() {
+        if visited.contains(&current_id) {
+            continue;
+        }
+        visited.insert(current_id.clone());
+
+        let entry = match node_map.get(&current_id) {
             Some(e) => e,
-            None => return,
+            None => continue,
         };
 
         let entry_type = entry.get("type").and_then(|s| s.as_str()).unwrap_or("unknown");
@@ -617,7 +618,7 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
 
         let (summary, status, role, duration_ms, tokens, cost) = build_node_summary(entry, entry_type);
 
-        let children = children_map.get(&Some(current_id.to_string())).cloned().unwrap_or_default();
+        let children = children_map.get(&Some(current_id.clone())).cloned().unwrap_or_default();
         let has_children = !children.is_empty();
         let multiple_children = children.len() > 1;
 
@@ -628,7 +629,7 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
         };
 
         nodes.push(SessionTreeNode {
-            id: current_id.to_string(),
+            id: current_id.clone(),
             parent_id,
             depth,
             is_branch_point: is_branch,
@@ -647,21 +648,82 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
             children_ids: children.clone(),
         });
 
-        // Traverse children
-        for (idx, child_id) in children.iter().enumerate() {
-            let child_is_branch = multiple_children && idx > 0;
-            traverse(child_id, depth + 1, child_is_branch, node_map, children_map, visited, nodes);
-        }
-    }
+        // Single-child chain stays flat (like Pi tree-selector);
+        // Only if multiple branches exist does child_indent = depth + 1 (capped at 16 to protect DOM)
+        let next_depth = if multiple_children {
+            (depth + 1).min(16)
+        } else {
+            depth
+        };
 
-    for root_id in &root_ids {
-        traverse(root_id, 0, false, &node_map, &children_map, &mut visited, &mut nodes);
+        // Push children in reverse order so the first child is popped and processed first
+        for (idx, child_id) in children.iter().enumerate().rev() {
+            let child_is_branch = multiple_children && idx > 0;
+            stack.push((child_id.clone(), next_depth, child_is_branch));
+        }
     }
 
     // Append any unvisited nodes as fallback
     for id in &id_order {
         if !visited.contains(id) {
-            traverse(id, 0, false, &node_map, &children_map, &mut visited, &mut nodes);
+            let mut fallback_stack = vec![(id.clone(), 0, false)];
+            while let Some((curr_id, depth, is_branch)) = fallback_stack.pop() {
+                if visited.contains(&curr_id) {
+                    continue;
+                }
+                visited.insert(curr_id.clone());
+
+                let entry = match node_map.get(&curr_id) {
+                    Some(e) => e,
+                    None => continue,
+                };
+
+                let entry_type = entry.get("type").and_then(|s| s.as_str()).unwrap_or("unknown");
+                let timestamp = entry.get("timestamp").and_then(|s| s.as_str()).map(|s| s.to_string());
+                let parent_id = entry.get("parentId").and_then(|s| s.as_str()).map(|s| s.to_string());
+
+                let (summary, status, role, duration_ms, tokens, cost) = build_node_summary(entry, entry_type);
+                let children = children_map.get(&Some(curr_id.clone())).cloned().unwrap_or_default();
+                let has_children = !children.is_empty();
+                let multiple_children = children.len() > 1;
+
+                let role_label = if let Some(ref r) = role {
+                    r.clone()
+                } else {
+                    entry_type.to_string()
+                };
+
+                nodes.push(SessionTreeNode {
+                    id: curr_id.clone(),
+                    parent_id,
+                    depth,
+                    is_branch_point: is_branch,
+                    entry_type: entry_type.to_string(),
+                    timestamp,
+                    role,
+                    role_label,
+                    summary,
+                    detail: entry.clone(),
+                    status,
+                    duration_ms,
+                    tokens,
+                    cost,
+                    is_leaf: !has_children,
+                    has_children,
+                    children_ids: children.clone(),
+                });
+
+                let next_depth = if multiple_children {
+                    (depth + 1).min(16)
+                } else {
+                    depth
+                };
+
+                for (idx, child_id) in children.iter().enumerate().rev() {
+                    let child_is_branch = multiple_children && idx > 0;
+                    fallback_stack.push((child_id.clone(), next_depth, child_is_branch));
+                }
+            }
         }
     }
 
@@ -727,3 +789,26 @@ pub fn get_active_telemetry() -> ActiveRequestTelemetry {
 
     ActiveRequestTelemetry::default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_large_session() {
+        let ws = scan_workspaces(Some(5), Some(5)).unwrap();
+        println!("Found {} workspaces", ws.len());
+        for w in &ws {
+            println!("Workspace: {} (sessions: {})", w.path, w.sessions.len());
+            for s in &w.sessions {
+                println!("Parsing session file: {}", s.file_path);
+                let res = parse_session_tree(&s.file_path);
+                match res {
+                    Ok(tree) => println!("  Parsed ok: {} nodes", tree.total_nodes),
+                    Err(e) => println!("  Parse err: {}", e),
+                }
+            }
+        }
+    }
+}
+
