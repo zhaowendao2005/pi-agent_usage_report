@@ -48,15 +48,16 @@
     </header>
 
     <!-- ===== Control Bar (sub-header) ===== -->
-    <div class="border-b border-border bg-background/80 px-4 py-2 sticky top-12 z-40">
+    <div v-if="activeTab !== 'monitor'" class="border-b border-border bg-background/80 px-4 py-2 sticky top-12 z-40">
       <ControlBar />
     </div>
 
     <!-- ===== Main Content ===== -->
-    <main class="flex-1 p-4 overflow-auto">
+    <main class="flex-1 overflow-auto" :class="activeTab === 'monitor' ? 'p-0 flex flex-col' : 'p-4'">
       <Transition name="fade" mode="out-in">
         <StatsView  v-if="activeTab === 'stats'" />
         <DetailView v-else-if="activeTab === 'detail'" />
+        <MonitorView v-else-if="activeTab === 'monitor'" />
         <PriceCalibrationView v-else-if="activeTab === 'price'" />
         <ConfigView v-else-if="activeTab === 'config'" />
       </Transition>
@@ -76,12 +77,13 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
-import { ActivityIcon, BarChart2Icon, ListIcon, SettingsIcon } from 'lucide-vue-next'
+import { ActivityIcon, BarChart2Icon, ListIcon, RadioIcon, SettingsIcon } from 'lucide-vue-next'
 import CalibrationIcon from '@/components/icons/CalibrationIcon.vue'
 import AppMessage   from '@/components/AppMessage.vue'
 import ControlBar   from '@/components/ControlBar.vue'
 import StatsView    from '@/views/StatsView.vue'
 import DetailView   from '@/views/DetailView.vue'
+import MonitorView  from '@/views/MonitorView.vue'
 import PriceCalibrationView from '@/views/PriceCalibrationView.vue'
 import ConfigView   from '@/views/ConfigView.vue'
 import { useUsageStore } from '@/stores/usage'
@@ -90,10 +92,11 @@ const store = useUsageStore()
 const { isLive, refreshInterval, series } = storeToRefs(store)
 
 const tabs = [
-  { id: 'stats',  label: '统计',  icon: BarChart2Icon },
-  { id: 'detail', label: '明细',  icon: ListIcon      },
-  { id: 'price',  label: '价格校准', icon: CalibrationIcon },
-  { id: 'config', label: '配置',  icon: SettingsIcon  },
+  { id: 'stats',   label: '统计',     icon: BarChart2Icon },
+  { id: 'detail',  label: '明细',     icon: ListIcon      },
+  { id: 'monitor', label: '监控',     icon: RadioIcon     },
+  { id: 'price',   label: '价格校准', icon: CalibrationIcon },
+  { id: 'config',  label: '配置',     icon: SettingsIcon  },
 ]
 
 const activeTab  = ref('stats')
@@ -114,14 +117,10 @@ onUnmounted(() => clearInterval(clockTimer))
 <style>
 .fade-enter-active,
 .fade-leave-active {
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity 0.15s ease;
 }
-.fade-enter-from {
-  opacity: 0;
-  transform: translateY(4px);
-}
+.fade-enter-from,
 .fade-leave-to {
   opacity: 0;
-  transform: translateY(-4px);
 }
 </style>

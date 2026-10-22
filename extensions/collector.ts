@@ -5,7 +5,12 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { usageDb, type CallRow } from "./db.js";
+
+export const ACTIVE_TURN_PATH = join(homedir(), ".pi", "pi-usage-report-store", "active_turn.json");
 
 const FLUSH_MAX_ROWS = 16;
 const FLUSH_INTERVAL_MS = 2000;
@@ -151,6 +156,45 @@ export class UsageCollector {
   private sessionFile: string | null = null;
   private callSeq = 0;
   private flushErrorCount = 0;
+  private liveAccumulatedChars = 0;
+  private lastActiveSyncAt = 0;
+
+  private syncActiveTurn(state: {
+    isActive: boolean;
+    phase?: string;
+    model?: string;
+    provider?: string;
+    currentDeltaSnippet?: string;
+    totalChars?: number;
+    startedAt?: number;
+    lastChunkAt?: number;
+    ttftMs?: number | null;
+  }): void {
+    try {
+      const now = Date.now();
+      const payload = {
+        isActive: state.isActive,
+        sessionId: this.sessionId,
+        model: state.model ?? null,
+        provider: state.provider ?? null,
+        phase: state.phase ?? (state.isActive ? "waiting_ttft" : "idle"),
+        currentDeltaSnippet: state.currentDeltaSnippet ?? "",
+        totalChars: state.totalChars ?? this.liveAccumulatedChars,
+        totalTokensEst: Math.round((state.totalChars ?? this.liveAccumulatedChars) / 3.5),
+        startedAt: state.startedAt ?? this.turn.t0 ?? null,
+        lastChunkAt: state.lastChunkAt ?? now,
+        silenceDurationMs: 0,
+        activeDurationMs: 0,
+        ttftMs: state.ttftMs ?? this.turn.ttftMs ?? null,
+        tpsCurrent: 0,
+        healthStatus: "healthy",
+        diagnosticVerdict: state.isActive ? "正在接收流式数据..." : "空闲",
+      };
+      writeFileSync(ACTIVE_TURN_PATH, JSON.stringify(payload), "utf-8");
+    } catch {
+      // ignore
+    }
+  }
 
   attach(pi: ExtensionAPI): void {
     pi.on("session_start", async (_event, ctx) => {
@@ -164,6 +208,7 @@ export class UsageCollector {
     });
 
     pi.on("session_shutdown", async () => {
+      this.syncActiveTurn({ isActive: false, phase: "idle" });
       this.flush(true);
       usageDb.close();
     });
@@ -171,6 +216,7 @@ export class UsageCollector {
     pi.on("turn_start", async () => {
       this.resetTurn();
       this.turn.t0 = Date.now();
+      this.syncActiveTurn({ isActive: true, phase: "waiting_ttft", startedAt: this.turn.t0 });
     });
 
     pi.on("context", async () => {
@@ -184,6 +230,7 @@ export class UsageCollector {
       if (this.turn.t0 == null) {
         this.turn.t0 = Date.now();
       }
+      this.syncActiveTurn({ isActive: true, phase: "waiting_ttft", startedAt: this.turn.t0 });
     });
 
     // HTTP status (incl. 4xx/5xx) before stream consume
@@ -203,25 +250,58 @@ export class UsageCollector {
       if (this.turn.t0 == null) {
         this.turn.t0 = Date.now();
       }
+      this.syncActiveTurn({
+        isActive: true,
+        phase: "waiting_ttft",
+        model: msg?.model,
+        provider: msg?.provider,
+      });
     });
 
     pi.on("message_update", async (event) => {
-      if (this.turn.firstDeltaSeen) return;
       const msg = (event as any).message;
       if (msg?.role && msg.role !== "assistant") return;
       const ame = (event as any).assistantMessageEvent;
-      if (ame && !isAnyStreamDelta(ame)) {
-        if (!this.turn.t0) return;
-      }
       const now = Date.now();
-      if (this.turn.t0 == null) {
-        this.turn.t0 = now - 50;
+
+      if (!this.turn.firstDeltaSeen) {
+        if (!ame || isAnyStreamDelta(ame) || this.turn.t0) {
+          if (this.turn.t0 == null) this.turn.t0 = now - 50;
+          this.turn.ttftMs = Math.max(10, now - this.turn.t0);
+          this.turn.firstDeltaSeen = true;
+        }
       }
-      this.turn.ttftMs = Math.max(10, now - this.turn.t0);
-      this.turn.firstDeltaSeen = true;
+
+      let snippet = "";
+      let isThinking = false;
+      if (ame) {
+        const delta = ame.delta ?? ame.text ?? ame.thinking ?? "";
+        if (typeof delta === "string") {
+          snippet = delta;
+          this.liveAccumulatedChars += delta.length;
+        }
+        if (ame.type === "thinking" || ame.type === "thought") {
+          isThinking = true;
+        }
+      }
+
+      if (now - this.lastActiveSyncAt >= 100 || !this.lastActiveSyncAt) {
+        this.lastActiveSyncAt = now;
+        this.syncActiveTurn({
+          isActive: true,
+          phase: isThinking ? "thinking" : "text",
+          model: msg?.model,
+          provider: msg?.provider,
+          currentDeltaSnippet: snippet,
+          totalChars: this.liveAccumulatedChars,
+          lastChunkAt: now,
+          ttftMs: this.turn.ttftMs,
+        });
+      }
     });
 
     pi.on("message_end", async (event, ctx) => {
+      this.syncActiveTurn({ isActive: false, phase: "idle" });
       const message = (event as any).message;
       if (!message || message.role !== "assistant") return;
 
@@ -375,6 +455,8 @@ export class UsageCollector {
 
   private resetTurn(): void {
     this.turn = emptyPendingTurn();
+    this.liveAccumulatedChars = 0;
+    this.lastActiveSyncAt = 0;
   }
 
   private enqueue(row: CallRow): void {

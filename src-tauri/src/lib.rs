@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod db;
+mod session;
 
 use config::UsageUiConfig;
 use db::{parse_time, CalibrationScript, Health, ModelUsage, ProviderGroup, ProviderStat, ServerSummary, TokenDataPoint};
@@ -143,6 +144,33 @@ fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn get_session_workspaces(
+    limit_workspaces: Option<usize>,
+    limit_sessions: Option<usize>,
+) -> Result<Vec<session::WorkspaceItem>, String> {
+    session::scan_workspaces(limit_workspaces, limit_sessions)
+}
+
+#[tauri::command]
+fn fetch_more_sessions(
+    workspace_id: String,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<session::SessionSummary>, String> {
+    session::fetch_workspace_sessions(&workspace_id, offset, limit)
+}
+
+#[tauri::command]
+fn get_session_tree(file_path: String) -> Result<session::SessionTreeResult, String> {
+    session::parse_session_tree(&file_path)
+}
+
+#[tauri::command]
+fn get_active_telemetry() -> session::ActiveRequestTelemetry {
+    session::get_active_telemetry()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -170,7 +198,11 @@ pub fn run() {
             save_auth_config,
             get_auth_status,
             update_auth_status,
-            show_main_window
+            show_main_window,
+            get_session_workspaces,
+            fetch_more_sessions,
+            get_session_tree,
+            get_active_telemetry
         ])
         .setup(|app| {
             // Ensure main window is visible on start
