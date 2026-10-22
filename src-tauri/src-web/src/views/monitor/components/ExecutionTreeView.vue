@@ -1,29 +1,5 @@
 <template>
   <div class="h-full flex flex-col overflow-hidden bg-background">
-    <!-- Tree Toolbar -->
-    <div class="h-9 px-4 border-b border-border flex items-center justify-between text-xs text-muted-foreground bg-card/30">
-      <div class="flex items-center gap-3">
-        <span class="font-medium text-foreground">
-          {{ monitorStore.visibleNodes.length }} 个节点
-        </span>
-        <span v-if="monitorStore.collapsedNodeIds.size > 0" class="text-primary text-[11px]">
-          (已折叠 {{ monitorStore.collapsedNodeIds.size }} 个分支)
-        </span>
-      </div>
-
-      <div class="flex items-center gap-2 text-[11px]">
-        <button
-          v-if="monitorStore.collapsedNodeIds.size > 0"
-          @click="monitorStore.collapsedNodeIds.clear()"
-          class="hover:text-foreground text-primary underline"
-        >
-          展开全部分支
-        </button>
-        <span class="text-border">|</span>
-        <span class="text-muted-foreground/70">悬停可高亮祖先标定线 · 单击节点查看详情</span>
-      </div>
-    </div>
-
     <!-- Tree Viewport (Strict independent vertical scroll, no horizontal leak) -->
     <div
       ref="treeContainerEl"
