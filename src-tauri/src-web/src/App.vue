@@ -1,8 +1,8 @@
 <template>
-  <div class="min-h-screen bg-background text-foreground flex flex-col">
+  <div class="h-screen overflow-hidden bg-background text-foreground flex flex-col select-none">
     <!-- ===== Top Header ===== -->
-    <header class="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-50">
-      <div class="px-4 h-12 flex items-center justify-between">
+    <header class="h-12 shrink-0 border-b border-border bg-card/50 backdrop-blur-sm z-50">
+      <div class="px-4 h-full flex items-center justify-between">
         <!-- Brand -->
         <div class="flex items-center gap-2.5">
           <img
@@ -48,12 +48,15 @@
     </header>
 
     <!-- ===== Control Bar (sub-header) ===== -->
-    <div v-if="activeTab !== 'monitor'" class="border-b border-border bg-background/80 px-4 py-2 sticky top-12 z-40">
+    <div v-if="activeTab !== 'monitor'" class="shrink-0 border-b border-border bg-background/80 px-4 py-2 z-40">
       <ControlBar />
     </div>
 
-    <!-- ===== Main Content ===== -->
-    <main class="flex-1 overflow-auto" :class="activeTab === 'monitor' ? 'p-0 flex flex-col' : 'p-4'">
+    <!-- ===== Main Content (Strict internal viewport isolation) ===== -->
+    <main
+      class="flex-1 min-h-0"
+      :class="activeTab === 'monitor' ? 'p-0 overflow-hidden flex flex-col' : 'p-4 overflow-y-auto'"
+    >
       <Transition name="fade" mode="out-in">
         <StatsView  v-if="activeTab === 'stats'" />
         <DetailView v-else-if="activeTab === 'detail'" />

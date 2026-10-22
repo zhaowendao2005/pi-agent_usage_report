@@ -24,10 +24,10 @@
       </div>
     </div>
 
-    <!-- Tree Viewport (Independent vertical scroll) -->
+    <!-- Tree Viewport (Strict independent vertical scroll, no horizontal leak) -->
     <div
       ref="treeContainerEl"
-      class="flex-1 overflow-y-auto overflow-x-auto py-2 font-mono text-xs select-none"
+      class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden py-2 font-mono text-xs select-none"
       @mouseleave="monitorStore.setHoveredNode(null)"
     >
       <div v-if="monitorStore.isLoadingTree" class="py-12 text-center text-xs text-muted-foreground">
@@ -39,19 +39,20 @@
         当前会话暂无执行节点
       </div>
 
-      <div v-else class="min-w-max">
+      <div v-else class="w-full flex flex-col">
         <div
           v-for="node in monitorStore.visibleNodes"
           :key="node.id"
           @click="onNodeClick(node)"
           @mouseenter="monitorStore.setHoveredNode(node)"
-          class="group relative flex items-center h-6.5 px-3 cursor-pointer transition-colors"
+          class="group relative flex items-center h-7 px-3 cursor-pointer transition-colors w-full min-w-0"
           :class="[
             monitorStore.activeNodeId === node.id
               ? 'bg-primary/15 text-foreground'
-              : 'hover:bg-accent/40 text-foreground/80 hover:text-foreground'
+              : 'hover:bg-accent/40 text-foreground/80 hover:text-foreground',
+            node.role === 'user' ? 'border-t border-border/40 mt-1 pt-0.5' : ''
           ]"
-          :style="{ paddingLeft: `${node.depth * 20 + 12}px` }"
+          :style="{ paddingLeft: `${node.depth * 22 + 12}px` }"
         >
           <!-- 1. VS Code Indent Guides (Vertical lines) -->
           <div class="absolute inset-y-0 left-0 pointer-events-none flex">
@@ -64,12 +65,13 @@
                   ? 'border-primary/80 opacity-100'
                   : 'border-border/50 group-hover:border-border/80 opacity-40'
               ]"
-              :style="{ width: '20px' }"
+              :style="{ width: '22px' }"
             >
               <!-- Branch elbow connector |-- or └── if this is a branch line -->
               <span
                 v-if="node.isBranchPoint && lvl === node.depth"
-                class="absolute top-1/2 left-0 w-2.5 border-t border-border/80 -translate-y-1/2"
+                class="absolute top-1/2 left-0 w-3 border-t border-border/80 -translate-y-1/2"
+                :class="monitorStore.activeGuideLevels.includes(lvl - 1) ? 'border-primary/80' : ''"
               />
             </div>
           </div>
@@ -79,10 +81,10 @@
             v-if="node.hasChildren"
             @click.stop="monitorStore.toggleNodeCollapse(node.id)"
             class="size-4 shrink-0 flex items-center justify-center mr-1 text-muted-foreground hover:text-foreground hover:bg-accent/80 rounded transition-colors"
-            :title="isCollapsed(node.id) ? '展开子节点' : '折叠子节点'"
+            :title="isCollapsed(node.id) ? '展开此轮所有步骤' : '折叠此轮执行步骤'"
           >
             <ChevronRightIcon
-              class="size-3 transition-transform duration-150"
+              class="size-3.5 transition-transform duration-150"
               :class="{ 'rotate-90': !isCollapsed(node.id) }"
             />
           </div>
@@ -116,17 +118,32 @@
             {{ getDisplayRole(node) }}
           </span>
 
-          <!-- 6. Message content summary -->
-          <span class="truncate text-[11px] text-foreground/90 font-mono flex-1 mr-4">
+          <!-- 5.1 Badge for User Turn step count (Clickable to collapse/expand) -->
+          <button
+            v-if="node.role === 'user' && node.childrenIds.length > 0"
+            @click.stop="monitorStore.toggleNodeCollapse(node.id)"
+            class="shrink-0 text-[10px] px-1.5 py-0.2 rounded font-sans transition-colors mr-1.5 hover:ring-1 hover:ring-primary/40 cursor-pointer"
+            :class="isCollapsed(node.id) ? 'bg-primary/20 text-primary font-medium' : 'bg-secondary/60 text-muted-foreground'"
+            :title="isCollapsed(node.id) ? '点击展开本轮步骤' : '点击折叠本轮步骤'"
+          >
+            {{ isCollapsed(node.id) ? `+ ${node.childrenIds.length} 步 (已折叠)` : `${node.childrenIds.length} 步` }}
+          </button>
+
+          <!-- 6. Message content summary (Strictly truncated, never blows out container) -->
+          <span
+            class="truncate text-[11px] font-mono flex-1 min-w-0 mr-3"
+            :class="node.role === 'user' ? 'text-foreground font-medium' : 'text-foreground/90'"
+            :title="node.summary"
+          >
             {{ formatSummary(node) }}
           </span>
 
           <!-- 7. Meta badges (latency / tokens / cost) on the right -->
-          <div class="shrink-0 flex items-center gap-2 text-[10px] text-muted-foreground/70 font-mono">
-            <span v-if="node.durationMs" class="px-1 py-0.2 rounded bg-secondary/50">
+          <div class="shrink-0 flex items-center gap-1.5 text-[10px] text-muted-foreground/70 font-mono ml-auto">
+            <span v-if="node.durationMs" class="px-1.5 py-0.5 rounded bg-secondary/50">
               {{ node.durationMs }}ms
             </span>
-            <span v-if="node.tokens" class="px-1 py-0.2 rounded bg-secondary/50">
+            <span v-if="node.tokens" class="px-1.5 py-0.5 rounded bg-secondary/50">
               {{ node.tokens }} tok
             </span>
           </div>

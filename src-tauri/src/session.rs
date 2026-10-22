@@ -3,7 +3,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -589,38 +589,28 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
         .cloned()
         .collect();
 
-    // Flatten tree iteratively to prevent stack overflow on deep session graphs
+    // Turn-based Hierarchical Tree Construction:
+    // 1. User prompts (`role: "user"`) are Turn Roots at Depth 0.
+    // 2. Execution steps inside a turn (thinking, bash, read, edit, assistant) are at Depth 1 (or Depth 2 for tool results).
+    // 3. Pre-session items (model_change, thinking_level, system prompt) are at Depth 0.
     let mut nodes: Vec<SessionTreeNode> = Vec::new();
-    let mut visited: HashSet<String> = HashSet::new();
+    let mut current_turn_user_idx: Option<usize> = None;
+    let mut current_turn_child_ids: Vec<String> = Vec::new();
 
-    // Stack tuple: (node_id, indent_depth, is_branch_point)
-    let mut stack: Vec<(String, usize, bool)> = Vec::new();
-
-    // Push roots in reverse order so first root is processed first
-    for root_id in root_ids.iter().rev() {
-        stack.push((root_id.clone(), 0, false));
-    }
-
-    while let Some((current_id, depth, is_branch)) = stack.pop() {
-        if visited.contains(&current_id) {
-            continue;
-        }
-        visited.insert(current_id.clone());
-
-        let entry = match node_map.get(&current_id) {
+    for id in &id_order {
+        let entry = match node_map.get(id) {
             Some(e) => e,
             None => continue,
         };
 
         let entry_type = entry.get("type").and_then(|s| s.as_str()).unwrap_or("unknown");
         let timestamp = entry.get("timestamp").and_then(|s| s.as_str()).map(|s| s.to_string());
-        let parent_id = entry.get("parentId").and_then(|s| s.as_str()).map(|s| s.to_string());
+        let orig_parent_id = entry.get("parentId").and_then(|s| s.as_str()).map(|s| s.to_string());
 
         let (summary, status, role, duration_ms, tokens, cost) = build_node_summary(entry, entry_type);
 
-        let children = children_map.get(&Some(current_id.clone())).cloned().unwrap_or_default();
-        let has_children = !children.is_empty();
-        let multiple_children = children.len() > 1;
+        let is_user = role.as_deref() == Some("user");
+        let is_tool_result = role.as_deref() == Some("toolResult");
 
         let role_label = if let Some(ref r) = role {
             r.clone()
@@ -628,103 +618,93 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
             entry_type.to_string()
         };
 
-        nodes.push(SessionTreeNode {
-            id: current_id.clone(),
-            parent_id,
-            depth,
-            is_branch_point: is_branch,
-            entry_type: entry_type.to_string(),
-            timestamp,
-            role,
-            role_label,
-            summary,
-            detail: entry.clone(),
-            status,
-            duration_ms,
-            tokens,
-            cost,
-            is_leaf: !has_children,
-            has_children,
-            children_ids: children.clone(),
-        });
+        if is_user {
+            // Finalize previous turn's children
+            if let Some(prev_idx) = current_turn_user_idx {
+                nodes[prev_idx].children_ids = current_turn_child_ids.clone();
+                nodes[prev_idx].has_children = !current_turn_child_ids.is_empty();
+                nodes[prev_idx].is_leaf = current_turn_child_ids.is_empty();
+            }
 
-        // Single-child chain stays flat (like Pi tree-selector);
-        // Only if multiple branches exist does child_indent = depth + 1 (capped at 16 to protect DOM)
-        let next_depth = if multiple_children {
-            (depth + 1).min(16)
+            // Start new Turn
+            current_turn_child_ids.clear();
+            let new_node_idx = nodes.len();
+            current_turn_user_idx = Some(new_node_idx);
+
+            nodes.push(SessionTreeNode {
+                id: id.clone(),
+                parent_id: orig_parent_id,
+                depth: 0,
+                is_branch_point: false,
+                entry_type: entry_type.to_string(),
+                timestamp,
+                role,
+                role_label,
+                summary,
+                detail: entry.clone(),
+                status,
+                duration_ms,
+                tokens,
+                cost,
+                is_leaf: true, // updated when children are finalized
+                has_children: false,
+                children_ids: Vec::new(),
+            });
+        } else if let Some(turn_idx) = current_turn_user_idx {
+            // Execution step inside current Turn
+            let turn_user_id = nodes[turn_idx].id.clone();
+            current_turn_child_ids.push(id.clone());
+
+            let depth = if is_tool_result { 2 } else { 1 };
+
+            nodes.push(SessionTreeNode {
+                id: id.clone(),
+                parent_id: Some(turn_user_id),
+                depth,
+                is_branch_point: true,
+                entry_type: entry_type.to_string(),
+                timestamp,
+                role,
+                role_label,
+                summary,
+                detail: entry.clone(),
+                status,
+                duration_ms,
+                tokens,
+                cost,
+                is_leaf: true,
+                has_children: false,
+                children_ids: Vec::new(),
+            });
         } else {
-            depth
-        };
-
-        // Push children in reverse order so the first child is popped and processed first
-        for (idx, child_id) in children.iter().enumerate().rev() {
-            let child_is_branch = multiple_children && idx > 0;
-            stack.push((child_id.clone(), next_depth, child_is_branch));
+            // Pre-turn initial configuration (model, thinking level, system prompt)
+            nodes.push(SessionTreeNode {
+                id: id.clone(),
+                parent_id: orig_parent_id,
+                depth: 0,
+                is_branch_point: false,
+                entry_type: entry_type.to_string(),
+                timestamp,
+                role,
+                role_label,
+                summary,
+                detail: entry.clone(),
+                status,
+                duration_ms,
+                tokens,
+                cost,
+                is_leaf: true,
+                has_children: false,
+                children_ids: Vec::new(),
+            });
         }
     }
 
-    // Append any unvisited nodes as fallback
-    for id in &id_order {
-        if !visited.contains(id) {
-            let mut fallback_stack = vec![(id.clone(), 0, false)];
-            while let Some((curr_id, depth, is_branch)) = fallback_stack.pop() {
-                if visited.contains(&curr_id) {
-                    continue;
-                }
-                visited.insert(curr_id.clone());
-
-                let entry = match node_map.get(&curr_id) {
-                    Some(e) => e,
-                    None => continue,
-                };
-
-                let entry_type = entry.get("type").and_then(|s| s.as_str()).unwrap_or("unknown");
-                let timestamp = entry.get("timestamp").and_then(|s| s.as_str()).map(|s| s.to_string());
-                let parent_id = entry.get("parentId").and_then(|s| s.as_str()).map(|s| s.to_string());
-
-                let (summary, status, role, duration_ms, tokens, cost) = build_node_summary(entry, entry_type);
-                let children = children_map.get(&Some(curr_id.clone())).cloned().unwrap_or_default();
-                let has_children = !children.is_empty();
-                let multiple_children = children.len() > 1;
-
-                let role_label = if let Some(ref r) = role {
-                    r.clone()
-                } else {
-                    entry_type.to_string()
-                };
-
-                nodes.push(SessionTreeNode {
-                    id: curr_id.clone(),
-                    parent_id,
-                    depth,
-                    is_branch_point: is_branch,
-                    entry_type: entry_type.to_string(),
-                    timestamp,
-                    role,
-                    role_label,
-                    summary,
-                    detail: entry.clone(),
-                    status,
-                    duration_ms,
-                    tokens,
-                    cost,
-                    is_leaf: !has_children,
-                    has_children,
-                    children_ids: children.clone(),
-                });
-
-                let next_depth = if multiple_children {
-                    (depth + 1).min(16)
-                } else {
-                    depth
-                };
-
-                for (idx, child_id) in children.iter().enumerate().rev() {
-                    let child_is_branch = multiple_children && idx > 0;
-                    fallback_stack.push((child_id.clone(), next_depth, child_is_branch));
-                }
-            }
-        }
+    // Finalize last turn
+    if let Some(last_idx) = current_turn_user_idx {
+        nodes[last_idx].children_ids = current_turn_child_ids;
+        nodes[last_idx].has_children = !nodes[last_idx].children_ids.is_empty();
+        nodes[last_idx].is_leaf = nodes[last_idx].children_ids.is_empty();
     }
 
     let total_nodes = nodes.len();

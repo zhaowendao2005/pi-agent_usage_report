@@ -16,3 +16,6 @@ skills/
 temp/
 src-tauri/skills/
 docs/PROJECT_INTRO_OUTLINE.md
+
+.playwright-cli/
+*.png

@@ -285,7 +285,8 @@ export class UsageCollector {
         }
       }
 
-      if (now - this.lastActiveSyncAt >= 100 || !this.lastActiveSyncAt) {
+      // 节流写入磁盘：500ms 一次，避免 100ms 高频 writeFileSync 对固态硬盘造成损耗
+      if (now - this.lastActiveSyncAt >= 500 || !this.lastActiveSyncAt) {
         this.lastActiveSyncAt = now;
         this.syncActiveTurn({
           isActive: true,
