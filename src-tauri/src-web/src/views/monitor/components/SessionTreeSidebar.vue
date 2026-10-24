@@ -7,13 +7,22 @@
           <FolderTreeIcon class="w-4 h-4 text-primary" />
           <span>工作空间与会话</span>
         </div>
-        <button
-          @click="monitorStore.fetchWorkspaces()"
-          title="刷新会话列表"
-          class="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <RotateCcwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': monitorStore.isLoadingWorkspaces }" />
-        </button>
+        <div class="flex items-center gap-1">
+          <button
+            @click="monitorStore.openAllWorkspacesModal()"
+            title="查看全部工作目录与会话 (全量拓扑树)"
+            class="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <FolderTreeIcon class="w-3.5 h-3.5 text-primary/80 hover:text-primary" />
+          </button>
+          <button
+            @click="monitorStore.fetchWorkspaces()"
+            title="刷新会话列表"
+            class="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <RotateCcwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': monitorStore.isLoadingWorkspaces }" />
+          </button>
+        </div>
       </div>
 
       <!-- Search Input -->
@@ -53,8 +62,9 @@
       >
         <!-- Level 1: Workspace Directory Item -->
         <div
-          @click="toggleWorkspaceCollapse(ws.id)"
+          @click="onWorkspaceHeaderClick(ws)"
           class="group flex items-center justify-between px-2 py-1.5 rounded cursor-pointer hover:bg-accent/60 transition-colors"
+          :class="monitorStore.activeWorkspaceId === ws.id ? 'bg-primary/10' : ''"
           :title="ws.path"
         >
           <div class="flex items-center gap-1.5 min-w-0">
@@ -68,7 +78,12 @@
             </span>
           </div>
 
-          <div class="flex items-center gap-1 shrink-0 ml-1.5 text-[11px] text-muted-foreground">
+          <div class="flex items-center gap-1.5 shrink-0 ml-1.5 text-[11px] text-muted-foreground">
+            <span
+              v-if="ws.lastOpenedAt"
+              class="size-1.5 rounded-full bg-emerald-500 shrink-0"
+              :title="`最近打开: ${formatRelativeTime(ws.lastOpenedAt)}`"
+            />
             <span class="px-1.5 py-0.2 rounded-full bg-secondary/80 text-[10px] font-mono">
               {{ ws.sessionCount }}
             </span>
@@ -80,7 +95,7 @@
           <div
             v-for="s in ws.sessions"
             :key="s.id"
-            @click="monitorStore.selectSession(s)"
+            @click="monitorStore.selectSession(s, ws.id)"
             class="group flex items-center justify-between px-2 py-1.5 rounded text-xs cursor-pointer transition-colors"
             :class="[
               monitorStore.activeSession?.id === s.id
@@ -125,11 +140,29 @@
           </div>
         </div>
       </div>
+
+      <!-- View all workspaces modal entry button -->
+      <div class="pt-2 pb-1 px-1">
+        <button
+          @click="monitorStore.openAllWorkspacesModal()"
+          class="w-full flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md bg-secondary/60 hover:bg-primary/10 hover:text-primary text-muted-foreground border border-border/70 hover:border-primary/40 transition-all text-xs font-medium cursor-pointer group shadow-xs"
+        >
+          <FolderTreeIcon class="w-3.5 h-3.5 text-muted-foreground group-hover:text-primary transition-colors" />
+          <span>查看全部工作目录与会话...</span>
+        </button>
+      </div>
     </div>
 
     <!-- Footer summary -->
     <div class="p-2.5 border-t border-border bg-card/40 text-[11px] text-muted-foreground flex items-center justify-between">
-      <span>{{ monitorStore.workspaces.length }} 个工作目录</span>
+      <button
+        @click="monitorStore.openAllWorkspacesModal()"
+        class="hover:text-foreground text-left cursor-pointer flex items-center gap-1 group"
+        title="点击弹窗查看所有工作空间与历史会话"
+      >
+        <span>常驻最近打开 {{ monitorStore.workspaces.length }} 个</span>
+        <span class="text-primary underline group-hover:text-primary/80">查看全部</span>
+      </button>
       <span class="font-mono text-[10px]">~/.pi/agent/sessions</span>
     </div>
   </aside>
@@ -163,6 +196,11 @@ function toggleWorkspaceCollapse(id: string) {
   } else {
     collapsedWorkspaces.value.add(id)
   }
+}
+
+function onWorkspaceHeaderClick(ws: WorkspaceItem) {
+  toggleWorkspaceCollapse(ws.id)
+  monitorStore.touchWorkspace(ws.id)
 }
 
 function formatWorkspaceName(path: string): string {

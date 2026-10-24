@@ -19,6 +19,7 @@ export interface WorkspaceItem {
   path: string
   sessionCount: number
   lastActiveAt: number
+  lastOpenedAt?: number
   sessions: SessionSummary[]
 }
 
@@ -80,6 +81,42 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
   return invoke<T>(cmd, args)
 }
 
+// === Workspace Recent Open Persistence & Ordering ===
+const STORAGE_KEY_LAST_OPENED = 'pi_monitor_workspaces_last_opened'
+
+export function getWorkspaceLastOpenedMap(): Record<string, number> {
+  try {
+    const data = localStorage.getItem(STORAGE_KEY_LAST_OPENED)
+    return data ? JSON.parse(data) : {}
+  } catch {
+    return {}
+  }
+}
+
+export function saveWorkspaceLastOpenedMap(map: Record<string, number>) {
+  try {
+    localStorage.setItem(STORAGE_KEY_LAST_OPENED, JSON.stringify(map))
+  } catch {
+    // silent fallback
+  }
+}
+
+export function recordWorkspaceOpened(workspaceId: string): number {
+  const map = getWorkspaceLastOpenedMap()
+  const now = Date.now()
+  map[workspaceId] = now
+  saveWorkspaceLastOpenedMap(map)
+  return now
+}
+
+export function getWorkspaceEffectiveTime(ws: WorkspaceItem): number {
+  return ws.lastOpenedAt ?? ws.lastActiveAt ?? 0
+}
+
+export function sortWorkspacesByRecentOpened(list: WorkspaceItem[]): WorkspaceItem[] {
+  return [...list].sort((a, b) => getWorkspaceEffectiveTime(b) - getWorkspaceEffectiveTime(a))
+}
+
 export const useMonitorStore = defineStore('monitor', () => {
   // --- State ---
   const workspaces = ref<WorkspaceItem[]>([])
@@ -95,6 +132,11 @@ export const useMonitorStore = defineStore('monitor', () => {
   const searchQuery = ref('')
   const isLoadingWorkspaces = ref(false)
   const isLoadingTree = ref(false)
+
+  // Workspace Modal State
+  const isAllWorkspacesModalOpen = ref(false)
+  const allWorkspaces = ref<WorkspaceItem[]>([])
+  const isLoadingAllWorkspaces = ref(false)
 
   // Config settings
   const maxWorkspaces = ref(5)
@@ -180,24 +222,43 @@ export const useMonitorStore = defineStore('monitor', () => {
   async function fetchWorkspaces() {
     isLoadingWorkspaces.value = true
     try {
+      const openedMap = getWorkspaceLastOpenedMap()
+
       if (isTauri()) {
+        // Fetch all workspaces so we can prioritize user's recently opened projects
         const res = await tauriInvoke<WorkspaceItem[]>('get_session_workspaces', {
-          limitWorkspaces: maxWorkspaces.value,
+          limitWorkspaces: null,
           limitSessions: maxSessionsPerDir.value,
         })
-        workspaces.value = res
+        for (const ws of res) {
+          if (openedMap[ws.id]) {
+            ws.lastOpenedAt = openedMap[ws.id]
+          }
+        }
+        const sorted = sortWorkspacesByRecentOpened(res)
+        allWorkspaces.value = sorted
+        workspaces.value = sorted.slice(0, maxWorkspaces.value)
+
         // Auto select first session if none active
-        if (!activeSession.value && res.length > 0 && res[0].sessions.length > 0) {
-          activeWorkspaceId.value = res[0].id
-          await selectSession(res[0].sessions[0])
+        if (!activeSession.value && workspaces.value.length > 0 && workspaces.value[0].sessions.length > 0) {
+          activeWorkspaceId.value = workspaces.value[0].id
+          await selectSession(workspaces.value[0].sessions[0], workspaces.value[0].id)
         }
       } else {
-        // Pure Web Dev Mode (Browser fallback mock)
+        // Pure Web Dev Mode (Browser fallback mock: top 5 by last active / recent opened)
         const mockWs = createMockWorkspaces()
-        workspaces.value = mockWs
-        if (mockWs.length > 0 && mockWs[0].sessions.length > 0) {
-          activeWorkspaceId.value = mockWs[0].id
-          await selectSession(mockWs[0].sessions[0])
+        for (const ws of mockWs) {
+          if (openedMap[ws.id]) {
+            ws.lastOpenedAt = openedMap[ws.id]
+          }
+        }
+        const sorted = sortWorkspacesByRecentOpened(mockWs)
+        allWorkspaces.value = sorted
+        workspaces.value = sorted.slice(0, maxWorkspaces.value)
+
+        if (workspaces.value.length > 0 && workspaces.value[0].sessions.length > 0) {
+          activeWorkspaceId.value = workspaces.value[0].id
+          await selectSession(workspaces.value[0].sessions[0], workspaces.value[0].id)
         }
       }
     } catch (err) {
@@ -207,8 +268,80 @@ export const useMonitorStore = defineStore('monitor', () => {
     }
   }
 
+  async function fetchAllWorkspaces() {
+    isLoadingAllWorkspaces.value = true
+    try {
+      const openedMap = getWorkspaceLastOpenedMap()
+      if (isTauri()) {
+        const res = await tauriInvoke<WorkspaceItem[]>('get_session_workspaces', {
+          limitWorkspaces: null,
+          limitSessions: 50,
+        })
+        for (const ws of res) {
+          if (openedMap[ws.id]) {
+            ws.lastOpenedAt = openedMap[ws.id]
+          }
+        }
+        allWorkspaces.value = sortWorkspacesByRecentOpened(res)
+      } else {
+        const mockWs = createMockWorkspaces()
+        for (const ws of mockWs) {
+          if (openedMap[ws.id]) {
+            ws.lastOpenedAt = openedMap[ws.id]
+          }
+        }
+        allWorkspaces.value = sortWorkspacesByRecentOpened(mockWs)
+      }
+    } catch (err) {
+      console.error('Failed to fetch all workspaces:', err)
+    } finally {
+      isLoadingAllWorkspaces.value = false
+    }
+  }
+
+  function touchWorkspace(workspaceId: string) {
+    const now = recordWorkspaceOpened(workspaceId)
+    activeWorkspaceId.value = workspaceId
+
+    // Locate the workspace item
+    let targetWs = allWorkspaces.value.find((w) => w.id === workspaceId)
+    if (!targetWs) {
+      targetWs = workspaces.value.find((w) => w.id === workspaceId)
+    }
+
+    if (targetWs) {
+      targetWs.lastOpenedAt = now
+    }
+
+    // Re-sort allWorkspaces by recent opened
+    allWorkspaces.value = sortWorkspacesByRecentOpened(allWorkspaces.value)
+
+    // Promote targetWs to the very top (#1) of workspaces (sidebar)
+    if (targetWs) {
+      const idx = workspaces.value.findIndex((w) => w.id === workspaceId)
+      if (idx !== -1) {
+        workspaces.value.splice(idx, 1)
+      }
+      workspaces.value.unshift(targetWs)
+      // Keep strictly maxWorkspaces (5)
+      if (workspaces.value.length > maxWorkspaces.value) {
+        workspaces.value = workspaces.value.slice(0, maxWorkspaces.value)
+      }
+    }
+  }
+
+  function openAllWorkspacesModal() {
+    isAllWorkspacesModalOpen.value = true
+  }
+
+  function closeAllWorkspacesModal() {
+    isAllWorkspacesModalOpen.value = false
+  }
+
   async function loadMoreSessionsForWorkspace(workspaceId: string) {
-    const ws = workspaces.value.find((w) => w.id === workspaceId)
+    const ws =
+      workspaces.value.find((w) => w.id === workspaceId) ||
+      allWorkspaces.value.find((w) => w.id === workspaceId)
     if (!ws) return
 
     try {
@@ -227,7 +360,20 @@ export const useMonitorStore = defineStore('monitor', () => {
     }
   }
 
-  async function selectSession(session: SessionSummary) {
+  async function selectSession(session: SessionSummary, workspaceId?: string) {
+    if (!workspaceId) {
+      const found =
+        workspaces.value.find((w) => w.sessions.some((s) => s.id === session.id)) ||
+        allWorkspaces.value.find((w) => w.sessions.some((s) => s.id === session.id))
+      if (found) {
+        workspaceId = found.id
+      }
+    }
+
+    if (workspaceId) {
+      touchWorkspace(workspaceId)
+    }
+
     activeSession.value = session
     isLoadingTree.value = true
     collapsedNodeIds.value.clear()
@@ -367,6 +513,9 @@ export const useMonitorStore = defineStore('monitor', () => {
     searchQuery,
     isLoadingWorkspaces,
     isLoadingTree,
+    isAllWorkspacesModalOpen,
+    allWorkspaces,
+    isLoadingAllWorkspaces,
     maxWorkspaces,
     maxSessionsPerDir,
     updateIntervalMs,
@@ -381,6 +530,10 @@ export const useMonitorStore = defineStore('monitor', () => {
 
     // actions
     fetchWorkspaces,
+    fetchAllWorkspaces,
+    openAllWorkspacesModal,
+    closeAllWorkspacesModal,
+    touchWorkspace,
     loadMoreSessionsForWorkspace,
     selectSession,
     refreshCurrentTreeSilently,
@@ -395,12 +548,45 @@ export const useMonitorStore = defineStore('monitor', () => {
 // === Mock Data for Browser Dev Mode ===
 
 function createMockWorkspaces(): WorkspaceItem[] {
+  const now = Date.now()
   return [
+    {
+      id: '--D--code-pi-extension-usage_report--',
+      path: 'D:\\code\\pi-extension\\usage_report',
+      sessionCount: 8,
+      lastActiveAt: now - 15_000,
+      sessions: [
+        {
+          id: '01a20101-11aa-4301-8811-000000000001',
+          fileName: '2026-10-23T06-40-12-100Z_01a20101.jsonl',
+          filePath: 'D:\\code\\pi-extension\\usage_report\\.pi\\session.jsonl',
+          cwd: 'D:\\code\\pi-extension\\usage_report',
+          title: '优化工作空间与全量会话树模态弹窗与检索交互',
+          createdAt: '2026-10-23T06:40:12.100Z',
+          updatedAt: now - 15_000,
+          fileSize: 98200,
+          entryCount: 28,
+          isLive: true,
+        },
+        {
+          id: '01a20101-11aa-4301-8811-000000000002',
+          fileName: '2026-10-23T05-20-00-000Z_01a20102.jsonl',
+          filePath: 'D:\\code\\pi-extension\\usage_report\\.pi\\session2.jsonl',
+          cwd: 'D:\\code\\pi-extension\\usage_report',
+          title: '解决端口占用与Vite前端免编译热重载调试方案',
+          createdAt: '2026-10-23T05:20:00.000Z',
+          updatedAt: now - 3600_000,
+          fileSize: 42100,
+          entryCount: 14,
+          isLive: false,
+        },
+      ],
+    },
     {
       id: '--F--lattice-archive-v2--',
       path: 'F:\\lattice-archive-v2',
       sessionCount: 12,
-      lastActiveAt: Date.now() - 30_000,
+      lastActiveAt: now - 45_000,
       sessions: [
         {
           id: '01a15b25-5c13-742b-8a13-da55e63e07d9',
@@ -409,10 +595,10 @@ function createMockWorkspaces(): WorkspaceItem[] {
           cwd: 'F:\\lattice-archive-v2',
           title: '这边输入行的位置，感觉有点不和谐，你给我一个调整方案看看',
           createdAt: '2026-10-20T21:08:57.491Z',
-          updatedAt: Date.now() - 30_000,
+          updatedAt: now - 45_000,
           fileSize: 142850,
           entryCount: 42,
-          isLive: true,
+          isLive: false,
         },
         {
           id: '01a16554-3f8d-703b-8644-d69381131bd9',
@@ -421,7 +607,7 @@ function createMockWorkspaces(): WorkspaceItem[] {
           cwd: 'F:\\lattice-archive-v2',
           title: '排查 MessageBubble 渲染卡顿与动画异常',
           createdAt: '2026-10-22T20:36:22.542Z',
-          updatedAt: Date.now() - 3600_000,
+          updatedAt: now - 3600_000 * 2,
           fileSize: 45200,
           entryCount: 18,
           isLive: false,
@@ -432,7 +618,7 @@ function createMockWorkspaces(): WorkspaceItem[] {
       id: '--D--code-salesTrace-v2--',
       path: 'D:\\code\\salesTrace-v2',
       sessionCount: 5,
-      lastActiveAt: Date.now() - 86400_000,
+      lastActiveAt: now - 3600_000 * 5,
       sessions: [
         {
           id: '01a15612-66da-72a2-ad5c-82c5267739e2',
@@ -441,9 +627,109 @@ function createMockWorkspaces(): WorkspaceItem[] {
           cwd: 'D:\\code\\salesTrace-v2',
           title: '重构销售机会流转看板数据聚合逻辑',
           createdAt: '2026-10-19T21:30:08.986Z',
-          updatedAt: Date.now() - 86400_000,
+          updatedAt: now - 3600_000 * 5,
           fileSize: 89000,
           entryCount: 35,
+          isLive: false,
+        },
+      ],
+    },
+    {
+      id: '--D--projects-crm-backend--',
+      path: 'D:\\projects\\crm-backend',
+      sessionCount: 16,
+      lastActiveAt: now - 3600_000 * 12,
+      sessions: [
+        {
+          id: '01a15888-77cc-99aa-bb11-445566778899',
+          fileName: 'session_crm.jsonl',
+          filePath: 'D:\\projects\\crm-backend\\.pi\\session.jsonl',
+          cwd: 'D:\\projects\\crm-backend',
+          title: '客户合同自动审批流与状态机迁移验证',
+          createdAt: '2026-10-18T10:15:30.000Z',
+          updatedAt: now - 3600_000 * 12,
+          fileSize: 112000,
+          entryCount: 50,
+          isLive: false,
+        },
+      ],
+    },
+    {
+      id: '--E--workspace-data-pipeline--',
+      path: 'E:\\workspace\\data-pipeline',
+      sessionCount: 7,
+      lastActiveAt: now - 86400_000,
+      sessions: [
+        {
+          id: '01a14111-2222-3333-4444-555566667777',
+          fileName: 'session_pipeline.jsonl',
+          filePath: 'E:\\workspace\\data-pipeline\\.pi\\session.jsonl',
+          cwd: 'E:\\workspace\\data-pipeline',
+          title: 'ClickHouse 批量写入降频与背压缓存机制设计',
+          createdAt: '2026-10-17T08:00:00.000Z',
+          updatedAt: now - 86400_000,
+          fileSize: 67300,
+          entryCount: 24,
+          isLive: false,
+        },
+      ],
+    },
+    {
+      id: '--D--frontend-admin-ui--',
+      path: 'D:\\code\\frontend-admin-ui',
+      sessionCount: 22,
+      lastActiveAt: now - 86400_000 * 2,
+      sessions: [
+        {
+          id: '01a13000-aaaa-bbbb-cccc-ddddeeeeffff',
+          fileName: 'session_admin.jsonl',
+          filePath: 'D:\\code\\frontend-admin-ui\\.pi\\session.jsonl',
+          cwd: 'D:\\code\\frontend-admin-ui',
+          title: '权限树勾选逻辑修复与全选反选联动问题排查',
+          createdAt: '2026-10-15T14:20:00.000Z',
+          updatedAt: now - 86400_000 * 2,
+          fileSize: 84000,
+          entryCount: 31,
+          isLive: false,
+        },
+      ],
+    },
+    {
+      id: '--C--Users-zhaowendao-desktop-quick-demo--',
+      path: 'C:\\Users\\zhaowendao\\Desktop\\quick-demo',
+      sessionCount: 3,
+      lastActiveAt: now - 86400_000 * 3,
+      sessions: [
+        {
+          id: '01a12000-1111-2222-3333-444455556666',
+          fileName: 'session_demo.jsonl',
+          filePath: 'C:\\Users\\zhaowendao\\Desktop\\quick-demo\\.pi\\session.jsonl',
+          cwd: 'C:\\Users\\zhaowendao\\Desktop\\quick-demo',
+          title: '编写简单的 WebSockets 回声测试服务器',
+          createdAt: '2026-10-14T09:10:00.000Z',
+          updatedAt: now - 86400_000 * 3,
+          fileSize: 18400,
+          entryCount: 12,
+          isLive: false,
+        },
+      ],
+    },
+    {
+      id: '--F--ai-model-evaluation--',
+      path: 'F:\\ai-model-evaluation',
+      sessionCount: 9,
+      lastActiveAt: now - 86400_000 * 5,
+      sessions: [
+        {
+          id: '01a11000-9999-8888-7777-666655554444',
+          fileName: 'session_eval.jsonl',
+          filePath: 'F:\\ai-model-evaluation\\.pi\\session.jsonl',
+          cwd: 'F:\\ai-model-evaluation',
+          title: 'DeepSeek-V3 vs Claude 3.5 Sonnet 代码重构评分基准测试',
+          createdAt: '2026-10-12T16:00:00.000Z',
+          updatedAt: now - 86400_000 * 5,
+          fileSize: 156000,
+          entryCount: 65,
           isLive: false,
         },
       ],

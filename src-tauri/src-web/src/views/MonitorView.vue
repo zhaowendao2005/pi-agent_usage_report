@@ -124,6 +124,9 @@
         </Transition>
       </main>
     </div>
+
+    <!-- Global All Workspaces Modal (VS Code Indent Guide Style) -->
+    <AllWorkspacesModal v-if="monitorStore.isAllWorkspacesModalOpen" />
   </div>
 </template>
 
@@ -143,6 +146,7 @@ import ExecutionTreeView from './monitor/components/ExecutionTreeView.vue'
 import LiveInspectorView from './monitor/components/LiveInspectorView.vue'
 import NodeDetailDrawer from './monitor/components/NodeDetailDrawer.vue'
 import SessionOverviewView from './monitor/components/SessionOverviewView.vue'
+import AllWorkspacesModal from './monitor/components/AllWorkspacesModal.vue'
 
 const monitorStore = useMonitorStore()
 
