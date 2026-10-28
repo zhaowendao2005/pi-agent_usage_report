@@ -5,12 +5,26 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { usageDb, type CallRow } from "./db.js";
 
 export const ACTIVE_TURN_PATH = join(homedir(), ".pi", "pi-usage-report-store", "active_turn.json");
+export const ACTIVE_TURNS_DIR = join(homedir(), ".pi", "pi-usage-report-store", "active_turns");
+
+export interface LiveTelemetryChunk {
+  seq: number;
+  timestamp: number;
+  phase: string;
+  chars: number;
+  totalChars: number;
+  text: string;
+}
+
+const MAX_LIVE_CHUNKS = 200;
+const MAX_ACCUMULATED_TEXT = 120_000;
+const ACTIVE_TURN_SYNC_THROTTLE_MS = 500;
 
 const FLUSH_MAX_ROWS = 16;
 const FLUSH_INTERVAL_MS = 2000;
@@ -151,49 +165,127 @@ function emptyPendingTurn(): PendingTurn {
 export class UsageCollector {
   private pending: CallRow[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private activeSyncTimer: ReturnType<typeof setTimeout> | null = null;
   private turn: PendingTurn = emptyPendingTurn();
   private sessionId = "unknown";
   private sessionFile: string | null = null;
   private callSeq = 0;
   private flushErrorCount = 0;
   private liveAccumulatedChars = 0;
+  private liveOutputTokens = 0;
+  private liveAccumulatedText = "";
+  private liveThinkingText = "";
+  private liveChunks: LiveTelemetryChunk[] = [];
+  private chunkSeq = 0;
   private lastActiveSyncAt = 0;
+  private lastPhase = "idle";
+  private lastModel: string | null = null;
+  private lastProvider: string | null = null;
 
-  private syncActiveTurn(state: {
+  private writeActiveTurnPayload(state: {
     isActive: boolean;
     phase?: string;
-    model?: string;
-    provider?: string;
+    model?: string | null;
+    provider?: string | null;
     currentDeltaSnippet?: string;
     totalChars?: number;
-    startedAt?: number;
+    outputTokens?: number;
+    startedAt?: number | null;
     lastChunkAt?: number;
     ttftMs?: number | null;
   }): void {
     try {
       const now = Date.now();
+      const totalChars = state.totalChars ?? this.liveAccumulatedChars;
+      const startedAt = state.startedAt ?? this.turn.t0 ?? null;
+      const elapsedSec = startedAt ? Math.max(0.1, (now - startedAt) / 1000) : 1;
+      const totalTokensEst =
+        state.outputTokens && state.outputTokens > 0
+          ? state.outputTokens
+          : this.liveOutputTokens > 0
+            ? this.liveOutputTokens
+            : Math.round(totalChars / 3.2);
+      const tpsCurrent =
+        state.isActive && totalTokensEst > 0
+          ? Math.min(800, +(totalTokensEst / elapsedSec).toFixed(1))
+          : 0;
+
+      if (state.model) this.lastModel = state.model;
+      if (state.provider) this.lastProvider = state.provider;
+
+      const phase = state.phase ?? (state.isActive ? "waiting_ttft" : "idle");
+      this.lastPhase = phase;
+
       const payload = {
         isActive: state.isActive,
         sessionId: this.sessionId,
-        model: state.model ?? null,
-        provider: state.provider ?? null,
-        phase: state.phase ?? (state.isActive ? "waiting_ttft" : "idle"),
+        model: state.model ?? this.lastModel ?? null,
+        provider: state.provider ?? this.lastProvider ?? null,
+        phase,
         currentDeltaSnippet: state.currentDeltaSnippet ?? "",
-        totalChars: state.totalChars ?? this.liveAccumulatedChars,
-        totalTokensEst: Math.round((state.totalChars ?? this.liveAccumulatedChars) / 3.5),
-        startedAt: state.startedAt ?? this.turn.t0 ?? null,
+        accumulatedText: this.liveAccumulatedText,
+        thinkingText: this.liveThinkingText,
+        chunks: this.liveChunks,
+        totalChars,
+        totalTokensEst,
+        startedAt,
         lastChunkAt: state.lastChunkAt ?? now,
         silenceDurationMs: 0,
-        activeDurationMs: 0,
+        activeDurationMs: startedAt ? Math.max(0, now - startedAt) : 0,
         ttftMs: state.ttftMs ?? this.turn.ttftMs ?? null,
-        tpsCurrent: 0,
+        tpsCurrent,
         healthStatus: "healthy",
-        diagnosticVerdict: state.isActive ? "正在接收流式数据..." : "空闲",
+        diagnosticVerdict: state.isActive ? "正在接收 LLM 输出流..." : "空闲",
       };
-      writeFileSync(ACTIVE_TURN_PATH, JSON.stringify(payload), "utf-8");
+      const jsonStr = JSON.stringify(payload);
+      writeFileSync(ACTIVE_TURN_PATH, jsonStr, "utf-8");
+
+      if (this.sessionId && this.sessionId !== "unknown") {
+        mkdirSync(ACTIVE_TURNS_DIR, { recursive: true });
+        const safeSessionId = this.sessionId.replace(/[^a-zA-Z0-9._-]/g, "_");
+        writeFileSync(join(ACTIVE_TURNS_DIR, `${safeSessionId}.json`), jsonStr, "utf-8");
+      }
+      this.lastActiveSyncAt = now;
     } catch {
       // ignore
     }
+  }
+
+  private syncActiveTurn(
+    state: {
+      isActive: boolean;
+      phase?: string;
+      model?: string | null;
+      provider?: string | null;
+      currentDeltaSnippet?: string;
+      totalChars?: number;
+      outputTokens?: number;
+      startedAt?: number | null;
+      lastChunkAt?: number;
+      ttftMs?: number | null;
+    },
+    force = false
+  ): void {
+    const now = Date.now();
+    const elapsed = now - this.lastActiveSyncAt;
+    if (force || !this.lastActiveSyncAt || elapsed >= ACTIVE_TURN_SYNC_THROTTLE_MS) {
+      if (this.activeSyncTimer) {
+        clearTimeout(this.activeSyncTimer);
+        this.activeSyncTimer = null;
+      }
+      this.writeActiveTurnPayload(state);
+      return;
+    }
+
+    if (this.activeSyncTimer) {
+      clearTimeout(this.activeSyncTimer);
+    }
+    const waitMs = Math.max(20, ACTIVE_TURN_SYNC_THROTTLE_MS - elapsed);
+    this.activeSyncTimer = setTimeout(() => {
+      this.activeSyncTimer = null;
+      this.writeActiveTurnPayload(state);
+    }, waitMs);
+    this.activeSyncTimer.unref?.();
   }
 
   attach(pi: ExtensionAPI): void {
@@ -204,37 +296,59 @@ export class UsageCollector {
       } catch (err) {
         console.error("[usage-report] failed to open db:", err);
       }
-      this.resetTurn();
+      this.resetLiveStream();
+      this.resetTurnTiming();
     });
 
-    pi.on("session_shutdown", async () => {
-      this.syncActiveTurn({ isActive: false, phase: "idle" });
+    pi.on("session_shutdown", async (_event, ctx) => {
+      this.refreshSession(ctx);
+      this.syncActiveTurn({ isActive: false, phase: "idle" }, true);
       this.flush(true);
       usageDb.close();
     });
 
-    pi.on("turn_start", async () => {
-      this.resetTurn();
+    pi.on("agent_start", async (_event, ctx) => {
+      this.refreshSession(ctx);
+      this.resetLiveStream();
+      this.resetTurnTiming();
       this.turn.t0 = Date.now();
-      this.syncActiveTurn({ isActive: true, phase: "waiting_ttft", startedAt: this.turn.t0 });
+      this.syncActiveTurn({ isActive: true, phase: "waiting_ttft", startedAt: this.turn.t0 }, true);
     });
 
-    pi.on("context", async () => {
+    pi.on("agent_end", async (_event, ctx) => {
+      this.refreshSession(ctx);
+      this.syncActiveTurn({ isActive: false, phase: "idle" }, true);
+    });
+
+    pi.on("turn_start", async (_event, ctx) => {
+      this.refreshSession(ctx);
+      if (this.lastPhase === "idle") {
+        this.resetLiveStream();
+      }
+      this.resetTurnTiming();
+      this.turn.t0 = Date.now();
+      this.syncActiveTurn({ isActive: true, phase: "waiting_ttft", startedAt: this.turn.t0 }, true);
+    });
+
+    pi.on("context", async (_event, ctx) => {
+      this.refreshSession(ctx);
       if (this.turn.t0 == null) {
         this.turn.t0 = Date.now();
       }
     });
 
-    pi.on("before_provider_request", async () => {
+    pi.on("before_provider_request", async (_event, ctx) => {
+      this.refreshSession(ctx);
       // First request in the turn marks t0 (retries keep original t0)
       if (this.turn.t0 == null) {
         this.turn.t0 = Date.now();
       }
-      this.syncActiveTurn({ isActive: true, phase: "waiting_ttft", startedAt: this.turn.t0 });
+      this.syncActiveTurn({ isActive: true, phase: "waiting_ttft", startedAt: this.turn.t0 }, true);
     });
 
     // HTTP status (incl. 4xx/5xx) before stream consume
-    pi.on("after_provider_response", async (event) => {
+    pi.on("after_provider_response", async (event, ctx) => {
+      this.refreshSession(ctx);
       const status = Number((event as any).status);
       if (Number.isFinite(status) && status > 0) {
         this.turn.lastHttpStatus = Math.trunc(status);
@@ -244,72 +358,148 @@ export class UsageCollector {
       }
     });
 
-    pi.on("message_start", async (event) => {
+    pi.on("message_start", async (event, ctx) => {
+      this.refreshSession(ctx);
       const msg = (event as any).message;
-      if (msg?.role && msg.role !== "assistant") return;
+      if (!msg || (msg.role && msg.role !== "assistant")) return;
       if (this.turn.t0 == null) {
         this.turn.t0 = Date.now();
       }
-      this.syncActiveTurn({
-        isActive: true,
-        phase: "waiting_ttft",
-        model: msg?.model,
-        provider: msg?.provider,
-      });
+      this.syncActiveTurn(
+        {
+          isActive: true,
+          phase: "waiting_ttft",
+          model: msg?.model,
+          provider: msg?.provider,
+          startedAt: this.turn.t0,
+        },
+        true
+      );
     });
 
-    pi.on("message_update", async (event) => {
+    pi.on("message_update", async (event, ctx) => {
+      this.refreshSession(ctx);
       const msg = (event as any).message;
       if (msg?.role && msg.role !== "assistant") return;
       const ame = (event as any).assistantMessageEvent;
       const now = Date.now();
 
+      let forceSync = false;
       if (!this.turn.firstDeltaSeen) {
         if (!ame || isAnyStreamDelta(ame) || this.turn.t0) {
           if (this.turn.t0 == null) this.turn.t0 = now - 50;
           this.turn.ttftMs = Math.max(10, now - this.turn.t0);
           this.turn.firstDeltaSeen = true;
+          forceSync = true;
         }
       }
 
       let snippet = "";
-      let isThinking = false;
+      let phase = this.lastPhase && this.lastPhase !== "idle" ? this.lastPhase : "text";
+
       if (ame) {
-        const delta = ame.delta ?? ame.text ?? ame.thinking ?? "";
-        if (typeof delta === "string") {
+        const evType = String(ame.type ?? "");
+        if (evType === "thinking_start" || evType === "thinking_delta" || evType === "thinking" || evType === "thought") {
+          phase = "thinking";
+        } else if (evType === "toolcall_start" || evType === "toolcall_delta" || evType === "toolcall_end") {
+          phase = "tool_call";
+        } else if (evType === "text_start" || evType === "text_delta" || evType === "text") {
+          phase = "text";
+        }
+
+        if (phase !== this.lastPhase) {
+          forceSync = true;
+        }
+
+        const isDeltaEvent =
+          evType === "thinking_delta" ||
+          evType === "text_delta" ||
+          evType === "toolcall_delta" ||
+          evType === "thinking" ||
+          evType === "thought" ||
+          evType === "text";
+
+        const delta = isDeltaEvent ? (ame.delta ?? ame.text ?? ame.thinking ?? "") : "";
+        if (typeof delta === "string" && delta.length > 0) {
           snippet = delta;
           this.liveAccumulatedChars += delta.length;
-        }
-        if (ame.type === "thinking" || ame.type === "thought") {
-          isThinking = true;
+          if (phase === "thinking") {
+            if (this.liveThinkingText.length < MAX_ACCUMULATED_TEXT) {
+              this.liveThinkingText += delta;
+            }
+          } else if (phase === "text") {
+            if (this.liveAccumulatedText.length < MAX_ACCUMULATED_TEXT) {
+              this.liveAccumulatedText += delta;
+            }
+          }
+          this.chunkSeq += 1;
+          this.liveChunks.push({
+            seq: this.chunkSeq,
+            timestamp: now,
+            phase,
+            chars: delta.length,
+            totalChars: this.liveAccumulatedChars,
+            text: delta,
+          });
+          if (this.liveChunks.length > MAX_LIVE_CHUNKS) {
+            this.liveChunks.splice(0, this.liveChunks.length - MAX_LIVE_CHUNKS);
+          }
         }
       }
 
-      // 节流写入磁盘：500ms 一次，避免 100ms 高频 writeFileSync 对固态硬盘造成损耗
-      if (now - this.lastActiveSyncAt >= 500 || !this.lastActiveSyncAt) {
-        this.lastActiveSyncAt = now;
-        this.syncActiveTurn({
+      const partialMsg = ame?.partial ?? msg;
+      const partialOut = Number(partialMsg?.usage?.output ?? 0);
+      if (partialOut > 0) {
+        this.liveOutputTokens = Math.max(this.liveOutputTokens, partialOut);
+      }
+
+      // 500ms 节流写入磁盘 + 首包/阶段切换立即同步 + 尾帧定时器保底
+      this.syncActiveTurn(
+        {
           isActive: true,
-          phase: isThinking ? "thinking" : "text",
-          model: msg?.model,
-          provider: msg?.provider,
+          phase,
+          model: partialMsg?.model ?? msg?.model,
+          provider: partialMsg?.provider ?? msg?.provider,
           currentDeltaSnippet: snippet,
           totalChars: this.liveAccumulatedChars,
           lastChunkAt: now,
           ttftMs: this.turn.ttftMs,
-        });
-      }
+        },
+        forceSync
+      );
     });
 
     pi.on("message_end", async (event, ctx) => {
-      this.syncActiveTurn({ isActive: false, phase: "idle" });
       const message = (event as any).message;
+      // 严禁在 user 或 toolResult 的 message_end 上重置活跃状态！仅处理 assistant 响应结束。
       if (!message || message.role !== "assistant") return;
+
+      this.refreshSession(ctx);
 
       const stopReason = normalizeStopReason(message.stopReason);
       const errorMessage = normalizeErrorMessage(message.errorMessage);
       const httpStatus = resolveHttpStatus(this.turn.lastHttpStatus, errorMessage);
       const usage = message.usage;
+      const outputTokens = Number(usage?.output ?? 0) || 0;
+      if (outputTokens > 0) {
+        this.liveOutputTokens += outputTokens;
+      }
+
+      // 若 stopReason 为 toolUse，说明 Agent 仍在继续执行下一轮请求；否则标记为 idle
+      const stillRunningTurn = stopReason === "toolUse";
+      this.syncActiveTurn(
+        {
+          isActive: stillRunningTurn,
+          phase: stillRunningTurn ? "waiting_ttft" : "idle",
+          model: message.model,
+          provider: message.provider,
+          totalChars: this.liveAccumulatedChars,
+          outputTokens: this.liveOutputTokens,
+          lastChunkAt: Date.now(),
+          ttftMs: this.turn.ttftMs,
+        },
+        true
+      );
 
       const isFailure =
         stopReason === "error" ||
@@ -317,15 +507,15 @@ export class UsageCollector {
         (httpStatus != null && (httpStatus < 200 || httpStatus >= 300));
 
       // Success without usage → skip (nothing useful). Failures always record.
-      if (!usage && !isFailure) return;
-
-      this.refreshSession(ctx);
+      if (!usage && !isFailure) {
+        this.resetTurnTiming();
+        return;
+      }
 
       const finishedAt = Date.now();
       let startedAt = this.turn.t0 ?? message.timestamp ?? finishedAt;
       let durationMs = Math.max(0, finishedAt - startedAt);
       const inputTokens = Number(usage?.input ?? 0) || 0;
-      const outputTokens = Number(usage?.output ?? 0) || 0;
       const cacheRead = Number(usage?.cacheRead ?? 0) || 0;
       const cacheWrite = Number(usage?.cacheWrite ?? 0) || 0;
 
@@ -384,7 +574,7 @@ export class UsageCollector {
       };
 
       this.enqueue(row);
-      this.resetTurn();
+      this.resetTurnTiming();
     });
 
     // Optional: tool nested LLM usage
@@ -454,10 +644,23 @@ export class UsageCollector {
     }
   }
 
-  private resetTurn(): void {
+  private resetTurnTiming(): void {
     this.turn = emptyPendingTurn();
+  }
+
+  private resetLiveStream(): void {
+    if (this.activeSyncTimer) {
+      clearTimeout(this.activeSyncTimer);
+      this.activeSyncTimer = null;
+    }
     this.liveAccumulatedChars = 0;
+    this.liveOutputTokens = 0;
+    this.liveAccumulatedText = "";
+    this.liveThinkingText = "";
+    this.liveChunks = [];
+    this.chunkSeq = 0;
     this.lastActiveSyncAt = 0;
+    this.lastPhase = "idle";
   }
 
   private enqueue(row: CallRow): void {

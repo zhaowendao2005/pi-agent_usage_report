@@ -1,50 +1,64 @@
 <template>
   <div class="h-full flex overflow-hidden bg-background">
-    <!-- Left: Session List Sidebar (1-2 Level Tree) -->
+    <!-- Left: Session List Sidebar (VS Code Explorer Tree) -->
     <SessionTreeSidebar />
 
-    <!-- Right: Workspace with Sub-Header Tabs and Subviews -->
+    <!-- Right: Workspace with Swiss Modernist Structural Grid -->
     <div class="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
-      <!-- Tier 1: Session Breadcrumbs & Live Pulse Status Bar -->
-      <div class="h-8 shrink-0 border-b border-border bg-card/30 px-3 flex items-center justify-between gap-3 select-none text-xs">
+      <!-- Tier 1: Session Breadcrumbs & Strictly Isolated Live Status Bar -->
+      <div class="h-8 shrink-0 border-b border-border bg-background px-4 flex items-center justify-between gap-3 select-none text-xs">
         <!-- Breadcrumb / Session Identity -->
-        <div class="flex items-center gap-1.5 min-w-0 flex-1">
+        <div class="flex items-center gap-2 min-w-0 flex-1">
           <TerminalIcon class="w-3.5 h-3.5 text-primary shrink-0" />
-          <span class="text-muted-foreground font-mono text-[11px] shrink-0 truncate max-w-[220px]" :title="monitorStore.activeSession?.cwd">
+          <span
+            class="text-muted-foreground font-mono text-[11px] shrink-0 truncate max-w-[240px]"
+            :title="monitorStore.activeSession?.cwd"
+          >
             {{ monitorStore.activeSession?.cwd || '未选择目录' }}
           </span>
-          <span class="text-muted-foreground/50 shrink-0">›</span>
-          <span class="font-medium text-foreground truncate min-w-0" :title="monitorStore.activeSession?.title || monitorStore.activeSession?.fileName">
+          <span class="text-border shrink-0">/</span>
+          <span
+            class="font-medium text-foreground truncate min-w-0"
+            :title="monitorStore.activeSession?.title || monitorStore.activeSession?.fileName"
+          >
             {{ monitorStore.activeSession?.title || monitorStore.activeSession?.fileName || '未选择会话' }}
+          </span>
+          <span
+            v-if="monitorStore.activeSession"
+            class="text-[10px] font-mono text-muted-foreground/60 shrink-0 hidden md:inline"
+          >
+            #{{ monitorStore.activeSession.id.slice(0, 8) }}
           </span>
         </div>
 
-        <!-- Right: Telemetry Pill + Refresh -->
+        <!-- Right: Strictly Isolated Telemetry Pill + Refresh -->
         <div class="flex items-center gap-2 shrink-0">
           <button
             @click="monitorStore.activeSubTab = 'live'"
-            class="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border text-[11px] font-mono transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            class="flex items-center gap-1.5 px-2.5 py-0.5 border text-[11px] font-mono transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             :class="[
-              monitorStore.telemetry.isActive
-                ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
-                : 'border-border/60 bg-secondary/50 text-muted-foreground hover:text-foreground'
+              curTel.isActive
+                ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/15'
+                : 'border-border bg-secondary/40 text-muted-foreground hover:text-foreground'
             ]"
-            title="点击直达实时流诊断大盘"
+            title="点击查看本会话实时流与传入数据明细"
           >
             <span
               class="size-1.5 rounded-full shrink-0"
-              :class="monitorStore.telemetry.isActive ? 'bg-emerald-400 animate-ping' : 'bg-muted-foreground/40'"
+              :class="curTel.isActive ? 'bg-emerald-500 animate-ping' : 'bg-muted-foreground/40'"
             />
-            <span v-if="monitorStore.telemetry.isActive">
-              {{ (monitorStore.telemetry.silenceDurationMs / 1000).toFixed(1) }}s 前 · {{ monitorStore.telemetry.tpsCurrent.toFixed(0) }} tok/s
+            <span v-if="curTel.isActive">
+              LIVE · {{ curTel.totalTokensEst.toLocaleString() }} tok · {{ curTel.tpsCurrent.toFixed(0) }} tok/s
             </span>
-            <span v-else>待命中</span>
+            <span v-else>
+              IDLE<template v-if="curTel.totalTokensEst > 0"> · {{ curTel.totalTokensEst.toLocaleString() }} tok</template>
+            </span>
           </button>
 
           <button
             @click="monitorStore.refreshCurrentTreeSilently()"
             title="刷新当前会话节点树"
-            class="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors shrink-0 cursor-pointer"
+            class="p-1 hover:bg-accent text-muted-foreground hover:text-foreground transition-colors shrink-0 cursor-pointer"
           >
             <RotateCcwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': monitorStore.isLoadingTree }" />
           </button>
@@ -52,64 +66,68 @@
       </div>
 
       <!-- Tier 2: Subview Switcher Tabs & View Context Bar -->
-      <div class="h-9 shrink-0 border-b border-border bg-card/60 px-3 flex items-center justify-between gap-3 select-none text-xs">
-        <!-- Center/Left Tabs -->
-        <nav class="flex items-center gap-1 bg-background/80 p-0.5 rounded-lg border border-border/80 shrink-0">
+      <div class="h-9 shrink-0 border-b border-border bg-background px-4 flex items-center justify-between gap-3 select-none text-xs">
+        <!-- Left Swiss Grid Tabs -->
+        <nav class="flex items-center h-full -mb-px shrink-0 gap-1">
           <button
             v-for="tab in subTabs"
             :key="tab.id"
             @click="monitorStore.activeSubTab = tab.id"
-            class="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer"
+            class="relative h-full flex items-center gap-1.5 px-3 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b-2"
             :class="monitorStore.activeSubTab === tab.id
-              ? 'bg-accent text-foreground shadow-sm'
-              : 'text-muted-foreground hover:text-foreground hover:bg-accent/40'"
+              ? 'border-primary text-foreground font-semibold'
+              : 'border-transparent text-muted-foreground hover:text-foreground'"
           >
-            <component :is="tab.icon" class="w-3.5 h-3.5 shrink-0" :class="tab.id === 'live' && monitorStore.telemetry.isActive ? 'text-emerald-400' : ''" />
+            <component
+              :is="tab.icon"
+              class="w-3.5 h-3.5 shrink-0"
+              :class="tab.id === 'live' && curTel.isActive ? 'text-emerald-500' : ''"
+            />
             <span>{{ tab.label }}</span>
             <span
-              v-if="tab.id === 'live' && monitorStore.telemetry.isActive"
+              v-if="tab.id === 'live' && curTel.isActive"
               class="size-1.5 rounded-full bg-emerald-500 animate-pulse ml-0.5"
             />
           </button>
         </nav>
 
         <!-- Right Context for Active Tab -->
-        <div class="flex items-center gap-3 text-[11px] text-muted-foreground shrink-0">
+        <div class="flex items-center gap-3 text-[11px] text-muted-foreground shrink-0 font-mono">
           <template v-if="monitorStore.activeSubTab === 'tree'">
-            <span class="font-medium text-foreground">
-              {{ monitorStore.visibleNodes.length }} 个节点
+            <span class="text-foreground">
+              可见 {{ monitorStore.visibleNodes.length }} / 总计 {{ monitorStore.sessionTree?.totalNodes ?? 0 }} 节点
             </span>
-            <span v-if="monitorStore.collapsedNodeIds.size > 0" class="text-primary">
-              (已折叠 {{ monitorStore.collapsedNodeIds.size }} 个分支)
+            <span v-if="monitorStore.collapsedNodeIds.size > 0" class="text-primary font-sans">
+              已收起 {{ monitorStore.collapsedNodeIds.size }} 个分支
             </span>
-            <button
-              v-if="monitorStore.collapsedNodeIds.size > 0"
-              @click="monitorStore.collapsedNodeIds.clear()"
-              class="hover:text-foreground text-primary underline cursor-pointer"
-            >
-              展开全部分支
-            </button>
-            <span class="text-border">|</span>
-            <span class="text-muted-foreground/70 hidden sm:inline">悬停可高亮祖先标定线</span>
-          </template>
-
-          <template v-else-if="monitorStore.activeSubTab === 'live'">
-            <span :class="monitorStore.telemetry.isActive ? 'text-emerald-400 font-medium' : 'text-muted-foreground'">
-              ● {{ monitorStore.telemetry.isActive ? '实时流式监控中' : '会话待命中' }}
-            </span>
+            <div class="flex items-center gap-1.5 font-sans">
+              <button
+                @click="monitorStore.expandAllNodes()"
+                class="hover:text-foreground text-primary hover:underline cursor-pointer"
+              >
+                全部展开
+              </button>
+              <span class="text-border">/</span>
+              <button
+                @click="monitorStore.collapseAllNodes()"
+                class="hover:text-foreground text-muted-foreground hover:underline cursor-pointer"
+              >
+                全部收起
+              </button>
+            </div>
           </template>
 
           <template v-else-if="monitorStore.activeSubTab === 'detail'">
-            <span v-if="monitorStore.selectedNode" class="font-mono text-foreground/80">
-              选中节点: {{ monitorStore.selectedNode.id }} ({{ monitorStore.selectedNode.roleLabel }})
+            <span v-if="monitorStore.selectedNode" class="text-foreground/80">
+              NODE: {{ monitorStore.selectedNode.id }} [{{ monitorStore.selectedNode.roleLabel }}]
             </span>
-            <span v-else class="text-muted-foreground">
-              未选中节点 (在执行树中点击节点查看详情)
+            <span v-else class="text-muted-foreground font-sans">
+              未选中节点（在执行节点树中点击任一节点按需加载详情）
             </span>
           </template>
 
           <template v-else-if="monitorStore.activeSubTab === 'summary'">
-            <span>全局会话度量透视</span>
+            <span class="font-sans">会话级指标与调用结构矩阵</span>
           </template>
         </div>
       </div>
@@ -125,13 +143,13 @@
       </main>
     </div>
 
-    <!-- Global All Workspaces Modal (VS Code Indent Guide Style) -->
+    <!-- Global All Workspaces & Session Selector Modal -->
     <AllWorkspacesModal v-if="monitorStore.isAllWorkspacesModalOpen" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import {
   GitForkIcon,
   ActivityIcon,
@@ -149,6 +167,7 @@ import SessionOverviewView from './monitor/components/SessionOverviewView.vue'
 import AllWorkspacesModal from './monitor/components/AllWorkspacesModal.vue'
 
 const monitorStore = useMonitorStore()
+const curTel = computed(() => monitorStore.currentSessionTelemetry)
 
 const subTabs = [
   { id: 'tree' as const, label: '执行节点树', icon: GitForkIcon },

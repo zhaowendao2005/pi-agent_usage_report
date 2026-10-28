@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 
 export interface SessionSummary {
   id: string
@@ -28,11 +28,15 @@ export interface SessionTreeNode {
   parentId: string | null
   depth: number
   isBranchPoint: boolean
+  branchKind?: 'user' | 'thinking' | 'tool' | 'assistant' | 'error' | 'system' | string
   entryType: string
   timestamp: string | null
   role: string | null
   roleLabel: string
   summary: string
+  model?: string | null
+  toolName?: string | null
+  charCount?: number
   detail: any
   status: string
   durationMs: number | null
@@ -51,6 +55,15 @@ export interface SessionTreeResult {
   totalNodes: usize
 }
 
+export interface TelemetryChunk {
+  seq: number
+  timestamp: number
+  phase: string
+  chars: number
+  totalChars: number
+  text: string
+}
+
 export interface ActiveRequestTelemetry {
   isActive: boolean
   sessionId: string | null
@@ -58,6 +71,9 @@ export interface ActiveRequestTelemetry {
   provider: string | null
   phase: string // "waiting_ttft" | "thinking" | "text" | "tool_call" | "idle"
   currentDeltaSnippet: string
+  accumulatedText: string
+  thinkingText: string
+  chunks: TelemetryChunk[]
   totalChars: number
   totalTokensEst: number
   startedAt: number | null
@@ -117,6 +133,30 @@ export function sortWorkspacesByRecentOpened(list: WorkspaceItem[]): WorkspaceIt
   return [...list].sort((a, b) => getWorkspaceEffectiveTime(b) - getWorkspaceEffectiveTime(a))
 }
 
+function createEmptyTelemetry(sessionId: string | null = null): ActiveRequestTelemetry {
+  return {
+    isActive: false,
+    sessionId,
+    model: null,
+    provider: null,
+    phase: 'idle',
+    currentDeltaSnippet: '',
+    accumulatedText: '',
+    thinkingText: '',
+    chunks: [],
+    totalChars: 0,
+    totalTokensEst: 0,
+    startedAt: null,
+    lastChunkAt: null,
+    silenceDurationMs: 0,
+    activeDurationMs: 0,
+    ttftMs: null,
+    tpsCurrent: 0,
+    healthStatus: 'healthy',
+    diagnosticVerdict: '当前会话无活跃请求，系统处于待命状态。',
+  }
+}
+
 export const useMonitorStore = defineStore('monitor', () => {
   // --- State ---
   const workspaces = ref<WorkspaceItem[]>([])
@@ -133,8 +173,14 @@ export const useMonitorStore = defineStore('monitor', () => {
   const isLoadingWorkspaces = ref(false)
   const isLoadingTree = ref(false)
 
+  // Cold-loaded Node Detail State
+  const selectedNodeDetail = ref<any>(null)
+  const isLoadingNodeDetail = ref(false)
+  const nodeDetailCache = new Map<string, any>()
+
   // Workspace Modal State
   const isAllWorkspacesModalOpen = ref(false)
+  const modalFocusedWorkspaceId = ref<string | null>(null)
   const allWorkspaces = ref<WorkspaceItem[]>([])
   const isLoadingAllWorkspaces = ref(false)
 
@@ -145,30 +191,25 @@ export const useMonitorStore = defineStore('monitor', () => {
   const idleWarningSec = ref(15)
   const idleDangerSec = ref(45)
 
-  // Telemetry
-  const telemetry = ref<ActiveRequestTelemetry>({
-    isActive: false,
-    sessionId: null,
-    model: null,
-    provider: null,
-    phase: 'idle',
-    currentDeltaSnippet: '',
-    totalChars: 0,
-    totalTokensEst: 0,
-    startedAt: null,
-    lastChunkAt: null,
-    silenceDurationMs: 0,
-    activeDurationMs: 0,
-    ttftMs: null,
-    tpsCurrent: 0,
-    healthStatus: 'healthy',
-    diagnosticVerdict: '当前无活跃请求，系统处于就绪状态。',
-  })
+  // Raw Telemetry from backend / mock
+  const telemetry = ref<ActiveRequestTelemetry>(createEmptyTelemetry(null))
 
   let telemetryTimer: any = null
   let treeLiveTimer: any = null
 
   // --- Getters ---
+  // Strictly isolated telemetry for the currently active session!
+  const currentSessionTelemetry = computed<ActiveRequestTelemetry>(() => {
+    const curSid = activeSession.value?.id ?? null
+    if (!curSid) {
+      return createEmptyTelemetry(null)
+    }
+    if (telemetry.value.sessionId && telemetry.value.sessionId !== curSid) {
+      return createEmptyTelemetry(curSid)
+    }
+    return telemetry.value
+  })
+
   const filteredWorkspaces = computed(() => {
     const q = searchQuery.value.trim().toLowerCase()
     if (!q) return workspaces.value
@@ -205,7 +246,6 @@ export const useMonitorStore = defineStore('monitor', () => {
     const collapsed = collapsedNodeIds.value
     const nodes = sessionTree.value.nodes
 
-    // Set of parent IDs whose descendants should be hidden
     const hiddenAncestorIds = new Set<string>(collapsed)
     const hiddenNodeIds = new Set<string>()
 
@@ -225,7 +265,6 @@ export const useMonitorStore = defineStore('monitor', () => {
       const openedMap = getWorkspaceLastOpenedMap()
 
       if (isTauri()) {
-        // Fetch all workspaces so we can prioritize user's recently opened projects
         const res = await tauriInvoke<WorkspaceItem[]>('get_session_workspaces', {
           limitWorkspaces: null,
           limitSessions: maxSessionsPerDir.value,
@@ -239,13 +278,11 @@ export const useMonitorStore = defineStore('monitor', () => {
         allWorkspaces.value = sorted
         workspaces.value = sorted.slice(0, maxWorkspaces.value)
 
-        // Auto select first session if none active
         if (!activeSession.value && workspaces.value.length > 0 && workspaces.value[0].sessions.length > 0) {
           activeWorkspaceId.value = workspaces.value[0].id
           await selectSession(workspaces.value[0].sessions[0], workspaces.value[0].id)
         }
       } else {
-        // Pure Web Dev Mode (Browser fallback mock: top 5 by last active / recent opened)
         const mockWs = createMockWorkspaces()
         for (const ws of mockWs) {
           if (openedMap[ws.id]) {
@@ -256,7 +293,7 @@ export const useMonitorStore = defineStore('monitor', () => {
         allWorkspaces.value = sorted
         workspaces.value = sorted.slice(0, maxWorkspaces.value)
 
-        if (workspaces.value.length > 0 && workspaces.value[0].sessions.length > 0) {
+        if (!activeSession.value && workspaces.value.length > 0 && workspaces.value[0].sessions.length > 0) {
           activeWorkspaceId.value = workspaces.value[0].id
           await selectSession(workspaces.value[0].sessions[0], workspaces.value[0].id)
         }
@@ -275,7 +312,7 @@ export const useMonitorStore = defineStore('monitor', () => {
       if (isTauri()) {
         const res = await tauriInvoke<WorkspaceItem[]>('get_session_workspaces', {
           limitWorkspaces: null,
-          limitSessions: 50,
+          limitSessions: 200,
         })
         for (const ws of res) {
           if (openedMap[ws.id]) {
@@ -284,7 +321,7 @@ export const useMonitorStore = defineStore('monitor', () => {
         }
         allWorkspaces.value = sortWorkspacesByRecentOpened(res)
       } else {
-        const mockWs = createMockWorkspaces()
+        const mockWs = createMockWorkspaces(true)
         for (const ws of mockWs) {
           if (openedMap[ws.id]) {
             ws.lastOpenedAt = openedMap[ws.id]
@@ -303,7 +340,6 @@ export const useMonitorStore = defineStore('monitor', () => {
     const now = recordWorkspaceOpened(workspaceId)
     activeWorkspaceId.value = workspaceId
 
-    // Locate the workspace item
     let targetWs = allWorkspaces.value.find((w) => w.id === workspaceId)
     if (!targetWs) {
       targetWs = workspaces.value.find((w) => w.id === workspaceId)
@@ -313,35 +349,34 @@ export const useMonitorStore = defineStore('monitor', () => {
       targetWs.lastOpenedAt = now
     }
 
-    // Re-sort allWorkspaces by recent opened
     allWorkspaces.value = sortWorkspacesByRecentOpened(allWorkspaces.value)
 
-    // Promote targetWs to the very top (#1) of workspaces (sidebar)
     if (targetWs) {
       const idx = workspaces.value.findIndex((w) => w.id === workspaceId)
       if (idx !== -1) {
         workspaces.value.splice(idx, 1)
       }
       workspaces.value.unshift(targetWs)
-      // Keep strictly maxWorkspaces (5)
       if (workspaces.value.length > maxWorkspaces.value) {
         workspaces.value = workspaces.value.slice(0, maxWorkspaces.value)
       }
     }
   }
 
-  function openAllWorkspacesModal() {
+  function openAllWorkspacesModal(focusWorkspaceId?: string) {
+    modalFocusedWorkspaceId.value = focusWorkspaceId ?? null
     isAllWorkspacesModalOpen.value = true
   }
 
   function closeAllWorkspacesModal() {
     isAllWorkspacesModalOpen.value = false
+    modalFocusedWorkspaceId.value = null
   }
 
   async function loadMoreSessionsForWorkspace(workspaceId: string) {
     const ws =
-      workspaces.value.find((w) => w.id === workspaceId) ||
-      allWorkspaces.value.find((w) => w.id === workspaceId)
+      allWorkspaces.value.find((w) => w.id === workspaceId) ||
+      workspaces.value.find((w) => w.id === workspaceId)
     if (!ws) return
 
     try {
@@ -349,16 +384,92 @@ export const useMonitorStore = defineStore('monitor', () => {
         const more = await tauriInvoke<SessionSummary[]>('fetch_more_sessions', {
           workspaceId,
           offset: ws.sessions.length,
-          limit: 10,
+          limit: 50,
         })
         if (more.length > 0) {
-          ws.sessions.push(...more)
+          const existingIds = new Set(ws.sessions.map((s) => s.id))
+          for (const item of more) {
+            if (!existingIds.has(item.id)) {
+              ws.sessions.push(item)
+            }
+          }
         }
       }
     } catch (err) {
       console.error('Failed to load more sessions:', err)
     }
   }
+
+  function applyDefaultCollapse(tree: SessionTreeResult) {
+    const set = new Set<string>()
+    for (const node of tree.nodes) {
+      if (node.hasChildren) {
+        set.add(node.id)
+      }
+    }
+    collapsedNodeIds.value = set
+  }
+
+  function collapseAllNodes() {
+    if (!sessionTree.value) return
+    const set = new Set<string>()
+    for (const node of sessionTree.value.nodes) {
+      if (node.hasChildren) {
+        set.add(node.id)
+      }
+    }
+    collapsedNodeIds.value = set
+  }
+
+  function expandAllNodes() {
+    collapsedNodeIds.value = new Set()
+  }
+
+  async function fetchNodeDetailOnDemand(node: SessionTreeNode | null) {
+    if (!node || !activeSession.value) {
+      selectedNodeDetail.value = null
+      return
+    }
+    // If detail is already populated in memory
+    if (node.detail && typeof node.detail === 'object' && Object.keys(node.detail).length > 0) {
+      selectedNodeDetail.value = node.detail
+      return
+    }
+    const cacheKey = `${activeSession.value.filePath}::${node.id}`
+    if (nodeDetailCache.has(cacheKey)) {
+      selectedNodeDetail.value = nodeDetailCache.get(cacheKey)
+      return
+    }
+
+    isLoadingNodeDetail.value = true
+    try {
+      if (isTauri()) {
+        const detail = await tauriInvoke<any>('get_session_node_detail', {
+          filePath: activeSession.value.filePath,
+          nodeId: node.id,
+        })
+        if (nodeDetailCache.size > 200) {
+          const firstKey = nodeDetailCache.keys().next().value
+          if (firstKey) nodeDetailCache.delete(firstKey)
+        }
+        nodeDetailCache.set(cacheKey, detail)
+        if (activeNodeId.value === node.id) {
+          selectedNodeDetail.value = detail
+        }
+      } else {
+        selectedNodeDetail.value = node.detail ?? { id: node.id, summary: node.summary }
+      }
+    } catch (err) {
+      console.error('Failed to cold-load node detail:', err)
+      selectedNodeDetail.value = { id: node.id, summary: node.summary }
+    } finally {
+      isLoadingNodeDetail.value = false
+    }
+  }
+
+  watch(selectedNode, (newNode) => {
+    fetchNodeDetailOnDemand(newNode)
+  })
 
   async function selectSession(session: SessionSummary, workspaceId?: string) {
     if (!workspaceId) {
@@ -372,12 +483,22 @@ export const useMonitorStore = defineStore('monitor', () => {
 
     if (workspaceId) {
       touchWorkspace(workspaceId)
+      // Ensure selected session is visible in sidebar's top sessions without expanding all N sessions
+      const sidebarWs = workspaces.value.find((w) => w.id === workspaceId)
+      if (sidebarWs && !sidebarWs.sessions.some((s) => s.id === session.id)) {
+        sidebarWs.sessions.unshift(session)
+        if (sidebarWs.sessions.length > maxSessionsPerDir.value) {
+          sidebarWs.sessions = sidebarWs.sessions.slice(0, maxSessionsPerDir.value)
+        }
+      }
     }
 
     activeSession.value = session
+    // Immediately reset telemetry to current session to prevent any cross-session flash
+    telemetry.value = createEmptyTelemetry(session.id)
     isLoadingTree.value = true
-    collapsedNodeIds.value.clear()
     activeNodeId.value = null
+    selectedNodeDetail.value = null
 
     try {
       if (isTauri()) {
@@ -385,17 +506,26 @@ export const useMonitorStore = defineStore('monitor', () => {
           filePath: session.filePath,
         })
         sessionTree.value = tree
-        if (tree.nodes.length > 0) {
+        // Default collapse all execution branches as requested
+        applyDefaultCollapse(tree)
+        // Select last top-level turn node by default
+        const roots = tree.nodes.filter((n) => n.depth === 0)
+        if (roots.length > 0) {
+          activeNodeId.value = roots[roots.length - 1].id
+        } else if (tree.nodes.length > 0) {
           activeNodeId.value = tree.nodes[tree.nodes.length - 1].id
         }
       } else {
-        // Pure Web Dev Mode Mock Tree
         const mockTree = createMockSessionTree(session.id)
         sessionTree.value = mockTree
-        if (mockTree.nodes.length > 0) {
-          activeNodeId.value = mockTree.nodes[mockTree.nodes.length - 1].id
+        applyDefaultCollapse(mockTree)
+        const roots = mockTree.nodes.filter((n) => n.depth === 0)
+        if (roots.length > 0) {
+          activeNodeId.value = roots[roots.length - 1].id
         }
       }
+      // Poll telemetry immediately for the newly selected session
+      await pollTelemetryOnce()
     } catch (err) {
       console.error('Failed to parse session tree:', err)
     } finally {
@@ -407,9 +537,16 @@ export const useMonitorStore = defineStore('monitor', () => {
     if (!activeSession.value) return
     try {
       if (isTauri()) {
+        const prevNodeIds = new Set(sessionTree.value?.nodes.map((n) => n.id) ?? [])
         const tree = await tauriInvoke<SessionTreeResult>('get_session_tree', {
           filePath: activeSession.value.filePath,
         })
+        // Auto-collapse any newly added parent turns while preserving user's manual expand/collapse state
+        for (const n of tree.nodes) {
+          if (n.hasChildren && !prevNodeIds.has(n.id)) {
+            collapsedNodeIds.value.add(n.id)
+          }
+        }
         sessionTree.value = tree
       }
     } catch {
@@ -417,36 +554,52 @@ export const useMonitorStore = defineStore('monitor', () => {
     }
   }
 
+  let lastTreeRefreshAt = 0
+
   async function pollTelemetryOnce() {
+    const curSession = activeSession.value
+    if (!curSession) {
+      telemetry.value = createEmptyTelemetry(null)
+      return
+    }
+
+    const wasActive = telemetry.value.isActive && telemetry.value.sessionId === curSession.id
+
     try {
       if (isTauri()) {
-        const tel = await tauriInvoke<ActiveRequestTelemetry>('get_active_telemetry')
-        telemetry.value = tel
+        const tel = await tauriInvoke<ActiveRequestTelemetry>('get_active_telemetry', {
+          sessionId: curSession.id,
+          filePath: curSession.filePath,
+        })
+        // Guard against race condition if user switched session while invoke was in-flight
+        if (activeSession.value?.id !== curSession.id) {
+          return
+        }
+        // Strict session isolation: never accept telemetry from another session
+        if (tel.sessionId && tel.sessionId !== curSession.id) {
+          telemetry.value = createEmptyTelemetry(curSession.id)
+          return
+        }
+        telemetry.value = {
+          ...createEmptyTelemetry(curSession.id),
+          ...tel,
+          sessionId: curSession.id,
+        }
 
-        // If telemetry is active and matches current session, refresh tree
-        if (tel.isActive) {
+        const now = Date.now()
+        // Refresh current session tree throttled (every 2s) while streaming, and once immediately when streaming finishes
+        if (tel.isActive && tel.sessionId === curSession.id) {
+          if (now - lastTreeRefreshAt >= 2000) {
+            lastTreeRefreshAt = now
+            await refreshCurrentTreeSilently()
+          }
+        } else if (wasActive && !tel.isActive) {
+          lastTreeRefreshAt = now
           await refreshCurrentTreeSilently()
         }
       } else {
-        // Pure Web Dev Mode mock live telemetry
-        telemetry.value = {
-          isActive: true,
-          sessionId: activeSession.value?.id ?? 'mock-session-id',
-          model: 'deepseek-v4.1-flash-1017',
-          provider: 'a6api-deepseek',
-          phase: 'text',
-          currentDeltaSnippet: '...已完成磁贴组件结构定义与边界吸附逻辑处理...',
-          totalChars: 1840,
-          totalTokensEst: 520,
-          startedAt: Date.now() - 14500,
-          lastChunkAt: Date.now() - 800,
-          silenceDurationMs: 800,
-          activeDurationMs: 14500,
-          ttftMs: 650,
-          tpsCurrent: 58.4,
-          healthStatus: 'healthy',
-          diagnosticVerdict: '🟢 正常高速流式中。实时吞吐率 58.4 tok/s，数据流顺畅。',
-        }
+        // Pure Web Dev Mode mock telemetry: strictly isolated by curSession.isLive!
+        telemetry.value = createMockTelemetryForSession(curSession)
       }
     } catch {
       // silent
@@ -471,11 +624,13 @@ export const useMonitorStore = defineStore('monitor', () => {
   }
 
   function toggleNodeCollapse(nodeId: string) {
-    if (collapsedNodeIds.value.has(nodeId)) {
-      collapsedNodeIds.value.delete(nodeId)
+    const next = new Set(collapsedNodeIds.value)
+    if (next.has(nodeId)) {
+      next.delete(nodeId)
     } else {
-      collapsedNodeIds.value.add(nodeId)
+      next.add(nodeId)
     }
+    collapsedNodeIds.value = next
   }
 
   function setHoveredNode(node: SessionTreeNode | null) {
@@ -485,7 +640,6 @@ export const useMonitorStore = defineStore('monitor', () => {
       return
     }
 
-    // Build ancestor levels list
     const levels: number[] = []
     let curr: SessionTreeNode | undefined = node
     while (curr) {
@@ -513,7 +667,10 @@ export const useMonitorStore = defineStore('monitor', () => {
     searchQuery,
     isLoadingWorkspaces,
     isLoadingTree,
+    selectedNodeDetail,
+    isLoadingNodeDetail,
     isAllWorkspacesModalOpen,
+    modalFocusedWorkspaceId,
     allWorkspaces,
     isLoadingAllWorkspaces,
     maxWorkspaces,
@@ -524,6 +681,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     telemetry,
 
     // getters
+    currentSessionTelemetry,
     filteredWorkspaces,
     selectedNode,
     visibleNodes,
@@ -536,6 +694,9 @@ export const useMonitorStore = defineStore('monitor', () => {
     touchWorkspace,
     loadMoreSessionsForWorkspace,
     selectSession,
+    collapseAllNodes,
+    expandAllNodes,
+    fetchNodeDetailOnDemand,
     refreshCurrentTreeSilently,
     pollTelemetryOnce,
     startLivePolling,
@@ -547,40 +708,185 @@ export const useMonitorStore = defineStore('monitor', () => {
 
 // === Mock Data for Browser Dev Mode ===
 
-function createMockWorkspaces(): WorkspaceItem[] {
+function createMockTelemetryForSession(session: SessionSummary): ActiveRequestTelemetry {
   const now = Date.now()
+  if (session.isLive) {
+    const chunks: TelemetryChunk[] = [
+      {
+        seq: 1,
+        timestamp: now - 14200,
+        phase: 'thinking',
+        chars: 68,
+        totalChars: 68,
+        text: '正在分析监控视图中 Session 1 与 Session 2 的实时数据追踪隔离边界问题...',
+      },
+      {
+        seq: 2,
+        timestamp: now - 11800,
+        phase: 'thinking',
+        chars: 94,
+        totalChars: 162,
+        text: '确认原因：pollTelemetryOnce 直接复用了全局 active_turn.json，需要按 sessionId 严格隔离。',
+      },
+      {
+        seq: 3,
+        timestamp: now - 8500,
+        phase: 'text',
+        chars: 120,
+        totalChars: 282,
+        text: '已完成 1px VS Code 垂直标定线与旋转角标（Chevron）对齐计算，移除了冗余的双重标定线与横向折线。',
+      },
+      {
+        seq: 4,
+        timestamp: now - 4200,
+        phase: 'text',
+        chars: 136,
+        totalChars: 418,
+        text: '正在构建虚拟滚动列表（Virtual Scroll）与按需冷加载通道，确保上千个节点与高频流式数据包下保持 60fps 渲染...',
+      },
+      {
+        seq: 5,
+        timestamp: now - 600,
+        phase: 'text',
+        chars: 86,
+        totalChars: 504,
+        text: '已同步应用瑞士国际现代主义（Swiss Modernist Grid）1px 开放式结构网格布局。',
+      },
+    ]
+
+    return {
+      isActive: true,
+      sessionId: session.id,
+      model: 'deepseek-v4.1-flash-1017',
+      provider: 'a6api-deepseek',
+      phase: 'text',
+      currentDeltaSnippet: chunks[chunks.length - 1].text,
+      thinkingText: chunks
+        .filter((c) => c.phase === 'thinking')
+        .map((c) => c.text)
+        .join('\n'),
+      accumulatedText: chunks
+        .filter((c) => c.phase !== 'thinking')
+        .map((c) => c.text)
+        .join('\n\n'),
+      chunks,
+      totalChars: 504,
+      totalTokensEst: 144,
+      startedAt: now - 14500,
+      lastChunkAt: now - 600,
+      silenceDurationMs: 600,
+      activeDurationMs: 14500,
+      ttftMs: 420,
+      tpsCurrent: 58.4,
+      healthStatus: 'healthy',
+      diagnosticVerdict: '正常高速流式中：实时吞吐率 58.4 tok/s，数据流顺畅。',
+    }
+  }
+
+  // Inactive Session (e.g. Session 2): strictly isActive = false, shows its own historical chunks
+  const histChunks: TelemetryChunk[] = [
+    {
+      seq: 1,
+      timestamp: session.updatedAt - 18000,
+      phase: 'thinking',
+      chars: 52,
+      totalChars: 52,
+      text: `[历史记录] 检索会话 "${session.title || session.fileName}" 的上下文结构与模块依赖。`,
+    },
+    {
+      seq: 2,
+      timestamp: session.updatedAt - 9000,
+      phase: 'tool_call',
+      chars: 78,
+      totalChars: 130,
+      text: `[toolCall: read] 读取目标配置文件与组件源码完成。`,
+    },
+    {
+      seq: 3,
+      timestamp: session.updatedAt - 2000,
+      phase: 'text',
+      chars: 112,
+      totalChars: 242,
+      text: `已完成该会话的所有预定修改并通过类型检查。当前会话已执行完毕，处于静止待命状态。`,
+    },
+  ]
+
+  return {
+    isActive: false,
+    sessionId: session.id,
+    model: 'claude-3-5-sonnet',
+    provider: 'anthropic',
+    phase: 'idle',
+    currentDeltaSnippet: '',
+    thinkingText: histChunks[0].text,
+    accumulatedText: `${histChunks[1].text}\n\n${histChunks[2].text}`,
+    chunks: histChunks,
+    totalChars: 242,
+    totalTokensEst: 69,
+    startedAt: null,
+    lastChunkAt: session.updatedAt,
+    silenceDurationMs: 0,
+    activeDurationMs: 0,
+    ttftMs: null,
+    tpsCurrent: 0,
+    healthStatus: 'healthy',
+    diagnosticVerdict: '当前会话无活跃请求，系统处于待命状态（下方展示本会话历史传入数据包）。',
+  }
+}
+
+function createMockWorkspaces(includeAll = false): WorkspaceItem[] {
+  const now = Date.now()
+  const baseSessionsWs1: SessionSummary[] = [
+    {
+      id: '01a20101-11aa-4301-8811-000000000001',
+      fileName: '2026-10-23T06-40-12-100Z_01a20101.jsonl',
+      filePath: 'D:\\code\\pi-extension\\usage_report\\.pi\\session.jsonl',
+      cwd: 'D:\\code\\pi-extension\\usage_report',
+      title: '优化工作空间与全量会话树模态弹窗与检索交互',
+      createdAt: '2026-10-23T06:40:12.100Z',
+      updatedAt: now - 15_000,
+      fileSize: 98200,
+      entryCount: 28,
+      isLive: true,
+    },
+    {
+      id: '01a20101-11aa-4301-8811-000000000002',
+      fileName: '2026-10-23T05-20-00-000Z_01a20102.jsonl',
+      filePath: 'D:\\code\\pi-extension\\usage_report\\.pi\\session2.jsonl',
+      cwd: 'D:\\code\\pi-extension\\usage_report',
+      title: '解决端口占用与Vite前端免编译热重载调试方案',
+      createdAt: '2026-10-23T05:20:00.000Z',
+      updatedAt: now - 3600_000,
+      fileSize: 42100,
+      entryCount: 14,
+      isLive: false,
+    },
+  ]
+
+  if (includeAll) {
+    for (let i = 3; i <= 8; i++) {
+      baseSessionsWs1.push({
+        id: `01a20101-11aa-4301-8811-00000000000${i}`,
+        fileName: `2026-10-22T0${i}-00-00-000Z_01a2010${i}.jsonl`,
+        filePath: `D:\\code\\pi-extension\\usage_report\\.pi\\session${i}.jsonl`,
+        cwd: 'D:\\code\\pi-extension\\usage_report',
+        title: `历史开发会话 #${i}：构建多维 Token 成本校准与适配器架构`,
+        createdAt: `2026-10-22T0${i}:00:00.000Z`,
+        updatedAt: now - 3600_000 * i,
+        fileSize: 34000 + i * 2000,
+        entryCount: 12 + i,
+        isLive: false,
+      })
+    }
+  }
+
   return [
     {
       id: '--D--code-pi-extension-usage_report--',
       path: 'D:\\code\\pi-extension\\usage_report',
       sessionCount: 8,
       lastActiveAt: now - 15_000,
-      sessions: [
-        {
-          id: '01a20101-11aa-4301-8811-000000000001',
-          fileName: '2026-10-23T06-40-12-100Z_01a20101.jsonl',
-          filePath: 'D:\\code\\pi-extension\\usage_report\\.pi\\session.jsonl',
-          cwd: 'D:\\code\\pi-extension\\usage_report',
-          title: '优化工作空间与全量会话树模态弹窗与检索交互',
-          createdAt: '2026-10-23T06:40:12.100Z',
-          updatedAt: now - 15_000,
-          fileSize: 98200,
-          entryCount: 28,
-          isLive: true,
-        },
-        {
-          id: '01a20101-11aa-4301-8811-000000000002',
-          fileName: '2026-10-23T05-20-00-000Z_01a20102.jsonl',
-          filePath: 'D:\\code\\pi-extension\\usage_report\\.pi\\session2.jsonl',
-          cwd: 'D:\\code\\pi-extension\\usage_report',
-          title: '解决端口占用与Vite前端免编译热重载调试方案',
-          createdAt: '2026-10-23T05:20:00.000Z',
-          updatedAt: now - 3600_000,
-          fileSize: 42100,
-          entryCount: 14,
-          isLive: false,
-        },
-      ],
+      sessions: baseSessionsWs1,
     },
     {
       id: '--F--lattice-archive-v2--',
@@ -674,66 +980,6 @@ function createMockWorkspaces(): WorkspaceItem[] {
         },
       ],
     },
-    {
-      id: '--D--frontend-admin-ui--',
-      path: 'D:\\code\\frontend-admin-ui',
-      sessionCount: 22,
-      lastActiveAt: now - 86400_000 * 2,
-      sessions: [
-        {
-          id: '01a13000-aaaa-bbbb-cccc-ddddeeeeffff',
-          fileName: 'session_admin.jsonl',
-          filePath: 'D:\\code\\frontend-admin-ui\\.pi\\session.jsonl',
-          cwd: 'D:\\code\\frontend-admin-ui',
-          title: '权限树勾选逻辑修复与全选反选联动问题排查',
-          createdAt: '2026-10-15T14:20:00.000Z',
-          updatedAt: now - 86400_000 * 2,
-          fileSize: 84000,
-          entryCount: 31,
-          isLive: false,
-        },
-      ],
-    },
-    {
-      id: '--C--Users-zhaowendao-desktop-quick-demo--',
-      path: 'C:\\Users\\zhaowendao\\Desktop\\quick-demo',
-      sessionCount: 3,
-      lastActiveAt: now - 86400_000 * 3,
-      sessions: [
-        {
-          id: '01a12000-1111-2222-3333-444455556666',
-          fileName: 'session_demo.jsonl',
-          filePath: 'C:\\Users\\zhaowendao\\Desktop\\quick-demo\\.pi\\session.jsonl',
-          cwd: 'C:\\Users\\zhaowendao\\Desktop\\quick-demo',
-          title: '编写简单的 WebSockets 回声测试服务器',
-          createdAt: '2026-10-14T09:10:00.000Z',
-          updatedAt: now - 86400_000 * 3,
-          fileSize: 18400,
-          entryCount: 12,
-          isLive: false,
-        },
-      ],
-    },
-    {
-      id: '--F--ai-model-evaluation--',
-      path: 'F:\\ai-model-evaluation',
-      sessionCount: 9,
-      lastActiveAt: now - 86400_000 * 5,
-      sessions: [
-        {
-          id: '01a11000-9999-8888-7777-666655554444',
-          fileName: 'session_eval.jsonl',
-          filePath: 'F:\\ai-model-evaluation\\.pi\\session.jsonl',
-          cwd: 'F:\\ai-model-evaluation',
-          title: 'DeepSeek-V3 vs Claude 3.5 Sonnet 代码重构评分基准测试',
-          createdAt: '2026-10-12T16:00:00.000Z',
-          updatedAt: now - 86400_000 * 5,
-          fileSize: 156000,
-          entryCount: 65,
-          isLive: false,
-        },
-      ],
-    },
   ]
 }
 
@@ -753,12 +999,14 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: null,
         depth: 0,
         isBranchPoint: false,
+        branchKind: 'system',
         entryType: 'model_change',
         timestamp: '2026-10-20T21:09:05.565Z',
         role: null,
         roleLabel: 'model_change',
+        model: 'deepseek-v4.1-flash-1017',
         summary: '[model: deepseek-v4.1-flash-1017 (thinking: low)]',
-        detail: { model: 'deepseek-v4.1-flash-1017' },
+        detail: { modelId: 'deepseek-v4.1-flash-1017' },
         status: 'ok',
         durationMs: null,
         tokens: null,
@@ -773,12 +1021,13 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: null,
         depth: 0,
         isBranchPoint: false,
+        branchKind: 'user',
         entryType: 'message',
         timestamp: '2026-10-20T21:09:29.480Z',
         role: 'user',
         roleLabel: 'user',
         summary: 'user: 这边输入行的位置，感觉有点不和谐，你给我一个调整方案看看',
-        detail: { content: '这边输入行的位置，感觉有点不和谐，你给我一个调整方案看看' },
+        detail: { message: { role: 'user', content: '这边输入行的位置，感觉有点不和谐，你给我一个调整方案看看' } },
         status: 'ok',
         durationMs: null,
         tokens: null,
@@ -792,10 +1041,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_1',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'thinking',
         entryType: 'message',
         timestamp: '2026-10-20T21:09:35.120Z',
         role: 'assistant',
         roleLabel: 'thinking',
+        model: 'deepseek-v4.1-flash-1017',
         summary: '[thinking] 用户给了一张截图，想调整输入行的位置。先看图片排查布局结构。',
         detail: {},
         status: 'ok',
@@ -811,10 +1062,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_1',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'tool',
         entryType: 'message',
         timestamp: '2026-10-20T21:09:37.400Z',
         role: 'toolResult',
         roleLabel: 'bash',
+        toolName: 'bash',
         summary: '[bash: cd /f/lattice-archive-v2 && rg --files src/views/main/chats | head -50]',
         detail: {},
         status: 'ok',
@@ -830,10 +1083,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_1',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'tool',
         entryType: 'message',
         timestamp: '2026-10-20T21:09:40.150Z',
         role: 'toolResult',
         roleLabel: 'read',
+        toolName: 'read',
         summary: '[read: src/views/main/chats/conversation/ConversationContainer.vue (offset 1, limit 80)]',
         detail: {},
         status: 'ok',
@@ -849,10 +1104,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_1',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'tool',
         entryType: 'message',
         timestamp: '2026-10-20T21:09:43.200Z',
         role: 'toolResult',
         roleLabel: 'read',
+        toolName: 'read',
         summary: '[read: src/views/main/chats/conversation/MessageFeed.vue (offset 1, limit 80)]',
         detail: {},
         status: 'ok',
@@ -868,10 +1125,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_1',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'assistant',
         entryType: 'message',
         timestamp: '2026-10-20T21:09:48.800Z',
         role: 'assistant',
         roleLabel: 'assistant',
+        model: 'deepseek-v4.1-flash-1017',
         summary: 'assistant: 现在理解结构了：MessageFeed (含蓝色背景图案) + MessageInput。建议将输入框底色设为 card 背景...',
         detail: {},
         status: 'ok',
@@ -888,6 +1147,7 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: null,
         depth: 0,
         isBranchPoint: false,
+        branchKind: 'user',
         entryType: 'message',
         timestamp: '2026-10-20T21:10:02.100Z',
         role: 'user',
@@ -907,10 +1167,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_2',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'thinking',
         entryType: 'message',
         timestamp: '2026-10-20T21:10:05.300Z',
         role: 'assistant',
         roleLabel: 'thinking',
+        model: 'deepseek-v4.1-flash-1017',
         summary: '[thinking] 执行方案 A。修改 MessageInput.vue 和 MessageFeed.vue，统一底色和内边距。',
         detail: {},
         status: 'ok',
@@ -926,29 +1188,33 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_2',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'tool',
         entryType: 'message',
         timestamp: '2026-10-20T21:10:08.500Z',
         role: 'toolResult',
         roleLabel: 'edit',
+        toolName: 'edit',
         summary: '[edit: src/views/main/chats/conversation/MessageInput.vue 替换 1 个区块]',
         detail: {},
         status: 'ok',
         durationMs: 82,
         tokens: null,
         cost: null,
-        isLeaf: false,
-        hasChildren: true,
-        childrenIds: ['step_t2_3'],
+        isLeaf: true,
+        hasChildren: false,
+        childrenIds: [],
       },
       {
         id: 'step_t2_3',
-        parentId: 'step_t2_2',
-        depth: 2,
+        parentId: 'turn_2',
+        depth: 1,
         isBranchPoint: true,
+        branchKind: 'tool',
         entryType: 'message',
         timestamp: '2026-10-20T21:10:08.520Z',
         role: 'toolResult',
         roleLabel: 'result',
+        toolName: 'edit',
         summary: '[editResult: Successfully replaced 1 block in MessageInput.vue]',
         detail: {},
         status: 'ok',
@@ -964,10 +1230,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_2',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'tool',
         entryType: 'message',
         timestamp: '2026-10-20T21:10:10.800Z',
         role: 'toolResult',
         roleLabel: 'edit',
+        toolName: 'edit',
         summary: '[edit: src/views/main/chats/conversation/MessageFeed.vue 调整遮罩渐变]',
         detail: {},
         status: 'ok',
@@ -983,10 +1251,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_2',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'tool',
         entryType: 'message',
         timestamp: '2026-10-20T21:10:14.200Z',
         role: 'toolResult',
         roleLabel: 'bash',
+        toolName: 'bash',
         summary: '[bash: npm run typecheck (0 errors)]',
         detail: {},
         status: 'ok',
@@ -1002,10 +1272,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_2',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'assistant',
         entryType: 'message',
         timestamp: '2026-10-20T21:10:18.900Z',
         role: 'assistant',
         roleLabel: 'assistant',
+        model: 'deepseek-v4.1-flash-1017',
         summary: 'assistant: 已经改完，类型检查也通过了。改动：MessageInput.vue 外层卡片颜色一致，边距已修复。',
         detail: {},
         status: 'ok',
@@ -1022,6 +1294,7 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: null,
         depth: 0,
         isBranchPoint: false,
+        branchKind: 'user',
         entryType: 'message',
         timestamp: '2026-10-20T21:11:05.100Z',
         role: 'user',
@@ -1041,10 +1314,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_3',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'thinking',
         entryType: 'message',
         timestamp: '2026-10-20T21:11:09.200Z',
         role: 'assistant',
         roleLabel: 'thinking',
+        model: 'deepseek-v4.1-flash-1017',
         summary: '[thinking] 用户要求：定位到磁性页面（应该是“磁贴”页面），模仿苹果文件夹的交互逻辑。正在检索 TileBoard.vue...',
         detail: {},
         status: 'ok',
@@ -1060,10 +1335,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_3',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'tool',
         entryType: 'message',
         timestamp: '2026-10-20T21:11:12.800Z',
         role: 'toolResult',
         roleLabel: 'read',
+        toolName: 'read',
         summary: '[read: src/views/main/settings/TileBoard.vue]',
         detail: {},
         status: 'ok',
@@ -1079,10 +1356,12 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
         parentId: 'turn_3',
         depth: 1,
         isBranchPoint: true,
+        branchKind: 'assistant',
         entryType: 'message',
         timestamp: '2026-10-20T21:11:18.500Z',
         role: 'assistant',
         roleLabel: 'assistant',
+        model: 'deepseek-v4.1-flash-1017',
         summary: 'assistant: 正在分析磁贴拖拽事件与拖放释放动画，已构建文件夹聚合逻辑...',
         detail: {},
         status: 'ok',

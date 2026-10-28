@@ -41,11 +41,15 @@ pub struct SessionTreeNode {
     pub parent_id: Option<String>,
     pub depth: usize,
     pub is_branch_point: bool,
+    pub branch_kind: String, // "user", "thinking", "tool", "assistant", "error", "system"
     pub entry_type: String,
     pub timestamp: Option<String>,
     pub role: Option<String>,
     pub role_label: String,
     pub summary: String,
+    pub model: Option<String>,
+    pub tool_name: Option<String>,
+    pub char_count: usize,
     pub detail: Value,
     pub status: String,
     pub duration_ms: Option<i64>,
@@ -66,8 +70,19 @@ pub struct SessionTreeResult {
     pub total_nodes: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TelemetryChunk {
+    pub seq: usize,
+    pub timestamp: i64,
+    pub phase: String,
+    pub chars: usize,
+    pub total_chars: usize,
+    pub text: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct ActiveRequestTelemetry {
     pub is_active: bool,
     pub session_id: Option<String>,
@@ -75,6 +90,9 @@ pub struct ActiveRequestTelemetry {
     pub provider: Option<String>,
     pub phase: String, // "waiting_ttft", "thinking", "text", "tool_call", "idle"
     pub current_delta_snippet: String,
+    pub accumulated_text: String,
+    pub thinking_text: String,
+    pub chunks: Vec<TelemetryChunk>,
     pub total_chars: usize,
     pub total_tokens_est: usize,
     pub started_at: Option<i64>,
@@ -96,6 +114,9 @@ impl Default for ActiveRequestTelemetry {
             provider: None,
             phase: "idle".to_string(),
             current_delta_snippet: String::new(),
+            accumulated_text: String::new(),
+            thinking_text: String::new(),
+            chunks: Vec::new(),
             total_chars: 0,
             total_tokens_est: 0,
             started_at: None,
@@ -105,7 +126,7 @@ impl Default for ActiveRequestTelemetry {
             ttft_ms: None,
             tps_current: 0.0,
             health_status: "healthy".to_string(),
-            diagnostic_verdict: "当前无活跃请求，系统处于就绪状态。".to_string(),
+            diagnostic_verdict: "当前会话无活跃请求，系统处于待命状态。".to_string(),
         }
     }
 }
@@ -118,6 +139,11 @@ pub fn sessions_dir() -> PathBuf {
 pub fn active_turn_file() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".pi").join("pi-usage-report-store").join("active_turn.json")
+}
+
+pub fn active_turns_dir() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".pi").join("pi-usage-report-store").join("active_turns")
 }
 
 fn mtime_ms(path: &Path) -> i64 {
@@ -591,7 +617,7 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
 
     // Turn-based Hierarchical Tree Construction:
     // 1. User prompts (`role: "user"`) are Turn Roots at Depth 0.
-    // 2. Execution steps inside a turn (thinking, bash, read, edit, assistant) are at Depth 1 (or Depth 2 for tool results).
+    // 2. Execution steps inside a turn (thinking, bash, read, edit, assistant, toolResult) are at Depth 1 (single VS Code indent guide).
     // 3. Pre-session items (model_change, thinking_level, system prompt) are at Depth 0.
     let mut nodes: Vec<SessionTreeNode> = Vec::new();
     let mut current_turn_user_idx: Option<usize> = None;
@@ -610,12 +636,55 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
         let (summary, status, role, duration_ms, tokens, cost) = build_node_summary(entry, entry_type);
 
         let is_user = role.as_deref() == Some("user");
-        let is_tool_result = role.as_deref() == Some("toolResult");
 
         let role_label = if let Some(ref r) = role {
             r.clone()
         } else {
             entry_type.to_string()
+        };
+
+        // Extract lightweight metadata for cold-loaded tree
+        let model = if entry_type == "model_change" {
+            entry.get("modelId").and_then(|s| s.as_str()).map(|s| s.to_string())
+        } else {
+            entry
+                .get("message")
+                .and_then(|m| m.get("model"))
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        };
+
+        let tool_name = entry
+            .get("message")
+            .and_then(|m| m.get("toolName"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                if role.as_deref() == Some("bashExecution") {
+                    Some("bash".to_string())
+                } else {
+                    None
+                }
+            });
+
+        let char_count = entry
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .map(|c| extract_content_text(Some(c)).chars().count())
+            .unwrap_or_else(|| summary.chars().count());
+
+        let branch_kind = if status == "error" || status == "aborted" {
+            "error".to_string()
+        } else if is_user {
+            "user".to_string()
+        } else if summary.contains("[thinking]") || entry_type == "thinking_level_change" {
+            "thinking".to_string()
+        } else if role.as_deref() == Some("toolResult") || role.as_deref() == Some("bashExecution") {
+            "tool".to_string()
+        } else if role.as_deref() == Some("assistant") {
+            "assistant".to_string()
+        } else {
+            "system".to_string()
         };
 
         if is_user {
@@ -636,12 +705,16 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
                 parent_id: orig_parent_id,
                 depth: 0,
                 is_branch_point: false,
+                branch_kind,
                 entry_type: entry_type.to_string(),
                 timestamp,
                 role,
                 role_label,
                 summary,
-                detail: entry.clone(),
+                model,
+                tool_name,
+                char_count,
+                detail: Value::Null, // Cold load: strip heavy detail from tree list
                 status,
                 duration_ms,
                 tokens,
@@ -651,23 +724,25 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
                 children_ids: Vec::new(),
             });
         } else if let Some(turn_idx) = current_turn_user_idx {
-            // Execution step inside current Turn
+            // Execution step inside current Turn (single clean depth = 1)
             let turn_user_id = nodes[turn_idx].id.clone();
             current_turn_child_ids.push(id.clone());
-
-            let depth = if is_tool_result { 2 } else { 1 };
 
             nodes.push(SessionTreeNode {
                 id: id.clone(),
                 parent_id: Some(turn_user_id),
-                depth,
+                depth: 1,
                 is_branch_point: true,
+                branch_kind,
                 entry_type: entry_type.to_string(),
                 timestamp,
                 role,
                 role_label,
                 summary,
-                detail: entry.clone(),
+                model,
+                tool_name,
+                char_count,
+                detail: Value::Null, // Cold load
                 status,
                 duration_ms,
                 tokens,
@@ -683,12 +758,16 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
                 parent_id: orig_parent_id,
                 depth: 0,
                 is_branch_point: false,
+                branch_kind,
                 entry_type: entry_type.to_string(),
                 timestamp,
                 role,
                 role_label,
                 summary,
-                detail: entry.clone(),
+                model,
+                tool_name,
+                char_count,
+                detail: Value::Null, // Cold load
                 status,
                 duration_ms,
                 tokens,
@@ -717,57 +796,360 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
     })
 }
 
-/// Reads the active request telemetry file or generates diagnostic status.
-pub fn get_active_telemetry() -> ActiveRequestTelemetry {
-    let p = active_turn_file();
-    let now_ms = Utc::now().timestamp_millis();
+/// Cold-load single node detail on demand from session JSONL file.
+pub fn get_session_node_detail(file_path: &str, node_id: &str) -> Result<Value, String> {
+    let path = Path::new(file_path);
+    if !path.exists() {
+        return Err(format!("Session file not found: {}", file_path));
+    }
 
-    if p.exists() {
-        if let Ok(content) = fs::read_to_string(&p) {
-            if let Ok(mut data) = serde_json::from_str::<ActiveRequestTelemetry>(&content) {
-                // Calculate dynamic elapsed and silence timings
-                if data.is_active {
-                    let last_chunk = data.last_chunk_at.unwrap_or_else(|| data.started_at.unwrap_or(now_ms));
-                    data.silence_duration_ms = (now_ms - last_chunk).max(0);
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
 
-                    if let Some(t0) = data.started_at {
-                        data.active_duration_ms = (now_ms - t0).max(0);
-                    }
-
-                    // Dynamically diagnose health
-                    let silence_sec = data.silence_duration_ms as f64 / 1000.0;
-                    if silence_sec > 45.0 {
-                        data.health_status = "danger".to_string();
-                        data.diagnostic_verdict = format!(
-                            "🚨 严重停滞警告！距上次接收数据已过去 {:.1}s。上游服务可能已超时挂起或连接中断。",
-                            silence_sec
-                        );
-                    } else if silence_sec > 15.0 {
-                        data.health_status = "warning".to_string();
-                        data.diagnostic_verdict = format!(
-                            "⚠️ 疑似延迟或排队阻塞。已静默 {:.1}s，正在等待模型输出下一个 Chunk。",
-                            silence_sec
-                        );
-                    } else if silence_sec > 3.0 {
-                        data.health_status = "waiting".to_string();
-                        data.diagnostic_verdict = format!(
-                            "⏳ 模型深度推理中。距上次更新 {:.1}s，链路保持正常。",
-                            silence_sec
-                        );
-                    } else {
-                        data.health_status = "healthy".to_string();
-                        data.diagnostic_verdict = format!(
-                            "🟢 正常高速流式中。实时吞吐率 {:.1} tok/s，数据流顺畅。",
-                            data.tps_current
-                        );
-                    }
-                }
-                return data;
+    for line in reader.lines().flatten() {
+        if line.trim().is_empty() || !line.contains(node_id) {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+            if v.get("id").and_then(|s| s.as_str()) == Some(node_id) {
+                return Ok(v);
             }
         }
     }
 
-    ActiveRequestTelemetry::default()
+    Err(format!("Node {} not found in session file", node_id))
+}
+
+/// Extracts historical received chunks and accumulated text from a session file for on-demand inspection.
+fn build_historical_session_telemetry(session_id: &str, file_path: &str) -> Option<ActiveRequestTelemetry> {
+    let path = Path::new(file_path);
+    if !path.exists() {
+        return None;
+    }
+
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+
+    let mut chunks: Vec<TelemetryChunk> = Vec::new();
+    let mut accumulated_text = String::new();
+    let mut thinking_text = String::new();
+    let mut total_chars = 0usize;
+    let mut total_tokens = 0usize;
+    let mut last_model: Option<String> = None;
+    let mut last_provider: Option<String> = None;
+    let mut seq = 0usize;
+
+    for line in reader.lines().flatten() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+            let entry_type = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
+            if entry_type == "model_change" {
+                if let Some(m) = v.get("modelId").and_then(|s| s.as_str()) {
+                    last_model = Some(m.to_string());
+                }
+            } else if entry_type == "message" {
+                if let Some(msg) = v.get("message") {
+                    let role = msg.get("role").and_then(|s| s.as_str()).unwrap_or("");
+                    if role == "user" {
+                        // Start of a new user turn: only retain the latest turn's received LLM output
+                        chunks.clear();
+                        accumulated_text.clear();
+                        thinking_text.clear();
+                        total_chars = 0;
+                        total_tokens = 0;
+                        seq = 0;
+                        continue;
+                    }
+                    if role != "assistant" {
+                        continue;
+                    }
+                    if let Some(m) = msg.get("model").and_then(|s| s.as_str()) {
+                        last_model = Some(m.to_string());
+                    }
+                    if let Some(p) = msg.get("provider").and_then(|s| s.as_str()) {
+                        last_provider = Some(p.to_string());
+                    }
+                    if let Some(u) = msg.get("usage") {
+                        let out_tok = u.get("output").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+                        total_tokens += out_tok;
+                    }
+
+                    let ts_ms = v
+                        .get("timestamp")
+                        .and_then(|s| s.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.timestamp_millis())
+                        .unwrap_or(0);
+
+                    if let Some(content) = msg.get("content") {
+                        if let Some(s) = content.as_str() {
+                            let chars = s.chars().count();
+                            if chars > 0 {
+                                total_chars += chars;
+                                seq += 1;
+                                if accumulated_text.len() < 120_000 {
+                                    if !accumulated_text.is_empty() {
+                                        accumulated_text.push_str("\n\n");
+                                    }
+                                    accumulated_text.push_str(s);
+                                }
+                                chunks.push(TelemetryChunk {
+                                    seq,
+                                    timestamp: ts_ms,
+                                    phase: "text".to_string(),
+                                    chars,
+                                    total_chars,
+                                    text: s.chars().take(600).collect(),
+                                });
+                            }
+                        } else if let Some(arr) = content.as_array() {
+                            for item in arr {
+                                let itype = item.get("type").and_then(|s| s.as_str()).unwrap_or("");
+                                if itype == "thinking" {
+                                    if let Some(t) = item.get("thinking").and_then(|s| s.as_str()) {
+                                        let chars = t.chars().count();
+                                        if chars > 0 {
+                                            total_chars += chars;
+                                            seq += 1;
+                                            if thinking_text.len() < 120_000 {
+                                                if !thinking_text.is_empty() {
+                                                    thinking_text.push_str("\n\n");
+                                                }
+                                                thinking_text.push_str(t);
+                                            }
+                                            chunks.push(TelemetryChunk {
+                                                seq,
+                                                timestamp: ts_ms,
+                                                phase: "thinking".to_string(),
+                                                chars,
+                                                total_chars,
+                                                text: t.chars().take(600).collect(),
+                                            });
+                                        }
+                                    }
+                                } else if itype == "text" {
+                                    if let Some(t) = item.get("text").and_then(|s| s.as_str()) {
+                                        let chars = t.chars().count();
+                                        if chars > 0 {
+                                            total_chars += chars;
+                                            seq += 1;
+                                            if accumulated_text.len() < 120_000 {
+                                                if !accumulated_text.is_empty() {
+                                                    accumulated_text.push_str("\n\n");
+                                                }
+                                                accumulated_text.push_str(t);
+                                            }
+                                            chunks.push(TelemetryChunk {
+                                                seq,
+                                                timestamp: ts_ms,
+                                                phase: "text".to_string(),
+                                                chars,
+                                                total_chars,
+                                                text: t.chars().take(600).collect(),
+                                            });
+                                        }
+                                    }
+                                } else if itype == "toolCall" {
+                                    let name = item.get("name").and_then(|s| s.as_str()).unwrap_or("tool");
+                                    let args_str = item
+                                        .get("arguments")
+                                        .map(|a| a.to_string())
+                                        .unwrap_or_default();
+                                    let text = format!("[toolCall: {}] {}", name, args_str);
+                                    let chars = text.chars().count();
+                                    total_chars += chars;
+                                    seq += 1;
+                                    chunks.push(TelemetryChunk {
+                                        seq,
+                                        timestamp: ts_ms,
+                                        phase: "tool_call".to_string(),
+                                        chars,
+                                        total_chars,
+                                        text: text.chars().take(600).collect(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let last_snippet = chunks.last().map(|c| c.text.clone()).unwrap_or_default();
+    let est_tokens = if total_tokens > 0 {
+        total_tokens
+    } else {
+        (total_chars as f64 / 3.5).round() as usize
+    };
+
+    Some(ActiveRequestTelemetry {
+        is_active: false,
+        session_id: Some(session_id.to_string()),
+        model: last_model,
+        provider: last_provider,
+        phase: "idle".to_string(),
+        current_delta_snippet: last_snippet,
+        accumulated_text,
+        thinking_text,
+        chunks,
+        total_chars,
+        total_tokens_est: est_tokens,
+        started_at: None,
+        last_chunk_at: None,
+        silence_duration_ms: 0,
+        active_duration_ms: 0,
+        ttft_ms: None,
+        tps_current: 0.0,
+        health_status: "healthy".to_string(),
+        diagnostic_verdict: "当前会话处于待命状态（已加载本会话历史接收数据包记录）。".to_string(),
+    })
+}
+
+/// Reads the active request telemetry file strictly isolated by `session_id`.
+pub fn get_active_telemetry(
+    session_id: Option<String>,
+    file_path: Option<String>,
+) -> ActiveRequestTelemetry {
+    let now_ms = Utc::now().timestamp_millis();
+
+    let mut matched_data: Option<ActiveRequestTelemetry> = None;
+
+    // 1. If a target session_id is provided, first look up its dedicated file in active_turns/
+    if let Some(ref target_sid) = session_id {
+        let safe_sid: String = target_sid
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let per_session_file = active_turns_dir().join(format!("{}.json", safe_sid));
+        if per_session_file.exists() {
+            if let Ok(content) = fs::read_to_string(&per_session_file) {
+                if let Ok(data) = serde_json::from_str::<ActiveRequestTelemetry>(&content) {
+                    if data.session_id.as_deref() == Some(target_sid.as_str()) {
+                        matched_data = Some(data);
+                    }
+                }
+            }
+        }
+
+        // Fallback check on global active_turn.json ONLY if its session_id matches target_sid
+        // (or if an un-restarted extension instance wrote "unknown" while this session file is actively being written)
+        if matched_data.is_none() {
+            let p = active_turn_file();
+            if p.exists() {
+                if let Ok(content) = fs::read_to_string(&p) {
+                    if let Ok(mut data) = serde_json::from_str::<ActiveRequestTelemetry>(&content) {
+                        let sid = data.session_id.as_deref().unwrap_or("");
+                        if sid == target_sid.as_str() {
+                            matched_data = Some(data);
+                        } else if (sid.is_empty() || sid == "unknown") && data.is_active {
+                            if let Some(ref fp) = file_path {
+                                if let Ok(meta) = fs::metadata(fp) {
+                                    if let Ok(modified) = meta.modified() {
+                                        let mtime_ms = modified
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis() as i64)
+                                            .unwrap_or(0);
+                                        if (now_ms - mtime_ms).abs() < 30_000 {
+                                            data.session_id = Some(target_sid.clone());
+                                            matched_data = Some(data);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // No session filter specified: read global active_turn.json
+        let p = active_turn_file();
+        if p.exists() {
+            if let Ok(content) = fs::read_to_string(&p) {
+                if let Ok(data) = serde_json::from_str::<ActiveRequestTelemetry>(&content) {
+                    matched_data = Some(data);
+                }
+            }
+        }
+    }
+
+    if let Some(mut data) = matched_data {
+        if data.is_active {
+            let last_chunk = data
+                .last_chunk_at
+                .unwrap_or_else(|| data.started_at.unwrap_or(now_ms));
+            data.silence_duration_ms = (now_ms - last_chunk).max(0);
+
+            if let Some(t0) = data.started_at {
+                data.active_duration_ms = (now_ms - t0).max(0);
+            }
+
+            let silence_sec = data.silence_duration_ms as f64 / 1000.0;
+            // If a turn file was left active after an abnormal process exit (> 180s ago), mark it idle
+            if silence_sec > 180.0 {
+                data.is_active = false;
+                data.phase = "idle".to_string();
+                data.health_status = "healthy".to_string();
+                data.diagnostic_verdict = "当前会话无活跃请求，系统处于待命状态。".to_string();
+            } else if silence_sec > 45.0 {
+                data.health_status = "danger".to_string();
+                data.diagnostic_verdict = format!(
+                    "严重停滞警告：距上次接收数据已过去 {:.1}s。上游服务可能已超时挂起或连接中断。",
+                    silence_sec
+                );
+            } else if silence_sec > 15.0 {
+                data.health_status = "warning".to_string();
+                data.diagnostic_verdict = format!(
+                    "疑似延迟或排队阻塞：已静默 {:.1}s，正在等待模型输出下一个数据块。",
+                    silence_sec
+                );
+            } else if silence_sec > 3.0 {
+                data.health_status = "waiting".to_string();
+                data.diagnostic_verdict = format!(
+                    "模型深度推理中：距上次更新 {:.1}s，链路保持正常。",
+                    silence_sec
+                );
+            } else {
+                data.health_status = "healthy".to_string();
+                data.diagnostic_verdict = format!(
+                    "正常高速流式中：实时吞吐率 {:.1} tok/s，数据流顺畅。",
+                    data.tps_current
+                );
+            }
+        }
+
+        // If chunks/accumulated_text are empty on an idle turn, supplement from file_path if available
+        if !data.is_active && data.chunks.is_empty() {
+            if let (Some(ref sid), Some(ref fp)) = (&session_id, &file_path) {
+                if let Some(hist) = build_historical_session_telemetry(sid, fp) {
+                    return hist;
+                }
+            }
+        }
+
+        return data;
+    }
+
+    // If no active turn matched for this session, return historical packets for this session (with is_active = false)
+    if let (Some(ref sid), Some(ref fp)) = (&session_id, &file_path) {
+        if let Some(hist) = build_historical_session_telemetry(sid, fp) {
+            return hist;
+        }
+    }
+
+    ActiveRequestTelemetry {
+        session_id,
+        ..ActiveRequestTelemetry::default()
+    }
 }
 
 #[cfg(test)]
@@ -784,11 +1166,27 @@ mod tests {
                 println!("Parsing session file: {}", s.file_path);
                 let res = parse_session_tree(&s.file_path);
                 match res {
-                    Ok(tree) => println!("  Parsed ok: {} nodes", tree.total_nodes),
+                    Ok(tree) => {
+                        println!("  Parsed ok: {} nodes", tree.total_nodes);
+                        for n in &tree.nodes {
+                            // Verify cold-load: tree nodes do not carry bulky detail JSON
+                            assert!(n.detail.is_null());
+                            // Verify single indent level (depth <= 1)
+                            assert!(n.depth <= 1);
+                        }
+                    }
                     Err(e) => println!("  Parse err: {}", e),
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_session_telemetry_isolation() {
+        // Requesting telemetry for a non-existent / inactive session ID must NEVER leak active status from another session
+        let tel = get_active_telemetry(Some("isolated_inactive_session_99999".to_string()), None);
+        assert!(!tel.is_active);
+        assert_eq!(tel.session_id.as_deref(), Some("isolated_inactive_session_99999"));
     }
 }
 

@@ -167,8 +167,16 @@ fn get_session_tree(file_path: String) -> Result<session::SessionTreeResult, Str
 }
 
 #[tauri::command]
-fn get_active_telemetry() -> session::ActiveRequestTelemetry {
-    session::get_active_telemetry()
+fn get_session_node_detail(file_path: String, node_id: String) -> Result<Value, String> {
+    session::get_session_node_detail(&file_path, &node_id)
+}
+
+#[tauri::command]
+fn get_active_telemetry(
+    session_id: Option<String>,
+    file_path: Option<String>,
+) -> session::ActiveRequestTelemetry {
+    session::get_active_telemetry(session_id, file_path)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -202,6 +210,7 @@ pub fn run() {
             get_session_workspaces,
             fetch_more_sessions,
             get_session_tree,
+            get_session_node_detail,
             get_active_telemetry
         ])
         .setup(|app| {
