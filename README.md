@@ -90,6 +90,22 @@ pnpm dev     # Tauri 开发模式（前端热更新，端口 5893）
 pnpm build   # 发布构建 → dist/extensions + dist/bin/<target>
 ```
 
+### 开发版 / 生产版隔离
+
+插件会通过模块路径自动识别运行环境（新增 `extensions/env.ts`）：
+
+- 源码仓库 / `pi -e ./dist` / `pi install ./repo` / pnpm link → **dev**（包根目录存在 `.git` 或 `src-tauri`）
+- npm 安装包 → **prod**（发布包只含 `dist/` 与 `scripts/`）
+- 可用 `PI_USAGE_DEV=1` / `PI_USAGE_PROD=1` 强制指定
+
+同一个 `pi` 进程里同时加载开发版和生产版时，**开发版自动优先**：生产版不再注册
+`/usage` 命令、不 attach 采集器，因此不会重复写库或出现 `/usage:2`。落选实例会
+在 stderr 打印一行 “suspended”。实现见 `extensions/env.ts` 的进程内 leader 选举。
+
+开发模式下 `/usage` 只使用本地二进制（`src-tauri/target/debug` → `target/release`），
+**不会下载线上发布版**。推荐直接用 `pnpm dev` 启动带热更新的仪表盘；若单独启动
+`target/debug` 二进制，需要 Vite 5893 端口在运行。
+
 ### macOS 打包说明
 
 - 只产出 `.app`（不产 dmg）：插件是 `spawn` 直接启动二进制，不需要安装步骤。

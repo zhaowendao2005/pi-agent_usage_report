@@ -46,7 +46,8 @@
               monitorStore.activeNodeId === item.node.id
                 ? 'bg-primary/12 text-foreground'
                 : 'hover:bg-accent/50 text-foreground/85 hover:text-foreground',
-              item.node.role === 'user' ? 'bg-secondary/15' : ''
+              item.node.role === 'user' ? 'bg-secondary/15' : '',
+              item.node.isRewind && monitorStore.activeNodeId !== item.node.id ? 'bg-amber-500/[0.04]' : ''
             ]"
             :style="{
               height: `${ROW_HEIGHT}px`,
@@ -57,6 +58,11 @@
             <span
               v-if="monitorStore.activeNodeId === item.node.id"
               class="pointer-events-none absolute inset-y-0 left-0 w-[2px] bg-primary"
+            />
+            <span
+              v-else-if="item.node.isRewind"
+              class="pointer-events-none absolute inset-y-0 left-0 w-[2px]"
+              :class="item.node.isOnActivePath ? 'bg-amber-500/70' : 'bg-amber-500/30'"
             />
             <span
               v-else-if="item.node.role === 'user'"
@@ -106,6 +112,16 @@
               T{{ item.turnNumber }}
             </span>
 
+            <!-- 3.1 Rewind / alternative branch badge -->
+            <button
+              v-if="item.node.isRewind"
+              @click.stop="jumpToOrigin(item.node)"
+              class="shrink-0 text-[9px] px-1 py-0 mr-1.5 border font-mono leading-tight cursor-pointer transition-colors border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20"
+              :title="rewindTitle(item.node)"
+            >
+              ⟲ {{ rewindLabel(item.node) }}
+            </button>
+
             <!-- 4. Original Role Icon (Preserved as requested) -->
             <component
               :is="getNodeIcon(item.node)"
@@ -133,7 +149,7 @@
 
             <!-- 5.2 Collapsible Step Count Badge for User Turn -->
             <button
-              v-if="item.node.role === 'user' && item.node.childrenIds.length > 0"
+              v-if="item.node.childrenIds.length > 0 && (item.node.role === 'user' || item.node.isRewind)"
               @click.stop="monitorStore.toggleNodeCollapse(item.node.id)"
               class="shrink-0 text-[10px] px-1.5 py-0 border font-mono transition-colors mr-2 cursor-pointer"
               :class="isCollapsed(item.node.id)
@@ -248,13 +264,14 @@ watch(
   }
 )
 
-// Map each turn root to a 1-based turn index for visual branch clarity
+// Map every user prompt to a 1-based turn index in display order. Rewound
+// branches keep their own T number and are additionally marked with the ⟲ badge.
 const turnIndexMap = computed(() => {
   const map = new Map<string, number>()
   const nodes = monitorStore.sessionTree?.nodes ?? []
   let tIdx = 0
   for (const n of nodes) {
-    if (n.role === 'user' && n.depth === 0) {
+    if (n.role === 'user') {
       tIdx += 1
       map.set(n.id, tIdx)
     }
@@ -292,7 +309,7 @@ function isCollapsed(id: string): boolean {
 
 function onNodeClick(node: SessionTreeNode) {
   monitorStore.activeNodeId = node.id
-  if (node.role === 'user' && node.hasChildren) {
+  if (node.hasChildren && (node.role === 'user' || node.isRewind)) {
     monitorStore.toggleNodeCollapse(node.id)
   }
 }
@@ -322,22 +339,39 @@ function isTurnActiveOrHovered(turnId: string): boolean {
 
 // Subtle branch-aware VS Code indent guide coloring
 function getGuideLineClass(node: SessionTreeNode, lvl: number): string {
-  const parentTurnId = node.parentId
-  if (parentTurnId && isTurnActiveOrHovered(parentTurnId)) {
-    if (node.status === 'error' || node.status === 'aborted') {
-      return 'bg-rose-500/70'
-    }
+  if (node.status === 'error' || node.status === 'aborted') {
+    return 'bg-rose-500/70'
+  }
+  if (node.parentId && isTurnActiveOrHovered(node.parentId)) {
     return 'bg-primary/70'
   }
   if (monitorStore.activeGuideLevels.includes(lvl - 1)) {
     return 'bg-primary/65'
   }
-  // Subtle alternating tint by turn number so different branches are visually distinct yet understated
-  const turnNum = parentTurnId ? (turnIndexMap.value.get(parentTurnId) ?? 0) : 0
-  if (turnNum % 2 === 1) {
-    return 'bg-foreground/20 group-hover:bg-foreground/35'
+  if (node.isRewind) {
+    return 'bg-amber-500/40 group-hover:bg-amber-500/60'
   }
   return 'bg-border/80 group-hover:bg-foreground/35'
+}
+
+function rewindLabel(node: SessionTreeNode): string {
+  if (node.branchCount && node.branchCount > 1) {
+    return `${node.branchIndex ?? '?'}/${node.branchCount}`
+  }
+  return 'RW'
+}
+
+function rewindTitle(node: SessionTreeNode): string {
+  const from = node.rewindFromId ? node.rewindFromId.slice(0, 8) : '?'
+  const idx =
+    node.branchCount && node.branchCount > 1 ? ` · 分支 ${node.branchIndex ?? '?'}/${node.branchCount}` : ''
+  return `Rewind · 从 #${from} 重新分支${idx}（点击跳转到分支点）`
+}
+
+function jumpToOrigin(node: SessionTreeNode) {
+  if (!node.rewindFromId) return
+  monitorStore.expandToNode(node.rewindFromId)
+  monitorStore.activeNodeId = node.rewindFromId
 }
 
 function getKeyLeafDotClass(node: SessionTreeNode): string {

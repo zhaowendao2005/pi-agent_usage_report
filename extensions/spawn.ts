@@ -1,7 +1,13 @@
 /**
  * Locate (and if needed fetch) the Tauri dashboard binary, then spawn it.
  *
- * Resolution order — first candidate that exists AND passes header inspection wins:
+ * Development mode (source checkout / `pi -e`): only local artifacts are used —
+ * `src-tauri/target/debug` (needs the Vite server on 5893), then
+ * `src-tauri/target/release`, then a locally staged `dist/bin`. Production
+ * payloads and downloads are never touched in dev mode.
+ *
+ * Production resolution order — first candidate that exists AND passes header
+ * inspection wins:
  *   1. $PI_USAGE_MONITOR_BIN                          explicit override
  *   2. <pkg>/dist/bin/<target>/<bin>                  monorepo / file: installs
  *   3. @zhaowendao2005/usage-report-<target>/bin/<bin> optional npm dependency (registry installs)
@@ -25,12 +31,16 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { createConnection } from "node:net";
+import { dirname, join, sep } from "node:path";
 import { arch, homedir, platform } from "node:os";
 import { fileURLToPath } from "node:url";
 import { checkBinary, expectedArch, sha256File } from "./binary.js";
+import { detectRuntimeEnv } from "./env.js";
 
 export const TARGET = `${platform()}-${arch()}`;
+export const DEV_SERVER_PORT = 5893;
+const DEV = detectRuntimeEnv().mode === "dev";
 const BIN = platform() === "win32" ? "pi-usage-monitor.exe" : "pi-usage-monitor";
 const STORE = join(homedir(), ".pi", "pi-usage-report-store");
 
@@ -85,6 +95,17 @@ export function candidateBins(root = packageRoot()): string[] {
   const out: string[] = [];
   const env = process.env.PI_USAGE_MONITOR_BIN;
   if (env) out.push(env);
+
+  if (DEV) {
+    // Development: only local artifacts. Never fall back to a staged release
+    // payload or the download cache — those are production builds and would
+    // debug the wrong binary.
+    out.push(join(root, "src-tauri", "target", "debug", BIN));
+    out.push(join(root, "src-tauri", "target", "release", BIN));
+    out.push(join(root, "dist", "bin", TARGET, BIN));
+    return out;
+  }
+
   out.push(join(root, "dist", "bin", TARGET, BIN)); // monorepo: <pkg>/dist/bin/...
   out.push(join(root, "bin", TARGET, BIN)); // hypothetical <pkg>/bin layout
   const platformPkg = fromPlatformPackage(); // registry install: usage-report-<target>
@@ -94,6 +115,57 @@ export function candidateBins(root = packageRoot()): string[] {
   out.push(join(root, "dist", BIN)); // legacy
   out.push(join(STORE, "bin", TARGET, BIN)); // download cache
   return out;
+}
+
+/** Best-effort check whether the Vite dev server is listening. */
+function devServerUp(port = DEV_SERVER_PORT, timeoutMs = 350): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    let settled = false;
+    const done = (up: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(up);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(false));
+    socket.once("error", () => done(false));
+  });
+}
+
+function isDebugBinary(path: string): boolean {
+  return path.includes(`${sep}target${sep}debug${sep}`);
+}
+
+/**
+ * Development variant of locateBinary(): skip the debug binary when the Vite
+ * dev server is down (it embeds devUrl and would open a blank window).
+ */
+async function locateDevBinary(root: string): Promise<Located | null> {
+  const rejections: string[] = [];
+  const viteUp = await devServerUp();
+
+  for (const candidate of candidateBins(root)) {
+    if (!existsSync(candidate)) continue;
+    if (isDebugBinary(candidate) && !viteUp) {
+      rejections.push(`${candidate} — skipped: Vite dev server on ${DEV_SERVER_PORT} is not running`);
+      continue;
+    }
+    const check = checkBinary(candidate);
+    if (!check.ok) {
+      rejections.push(`${candidate} — ${check.reason}`);
+      continue;
+    }
+    try {
+      if (platform() !== "win32") chmodSync(candidate, 0o755);
+    } catch {
+      /* read-only store */
+    }
+    return { path: candidate, rejections };
+  }
+  return rejections.length > 0 ? { path: "", rejections } : null;
 }
 
 interface Located {
@@ -180,13 +252,16 @@ function failureMessage(root: string, located: Located | null, extra?: string): 
   const lines = [
     `Dashboard binary for ${TARGET} (${expectedArch()}) is not available.`,
     extra ? `Reason: ${extra}` : "",
+    DEV ? `Mode: dev (${detectRuntimeEnv().reason}) — production binaries are never downloaded in dev mode.` : "",
     "Checked:",
     ...checked.map((p) => `  ${p}${existsSync(p) ? "" : "  (missing)"}`),
-    located?.rejections.length ? "\nRejected (wrong format/arch):" : "",
+    located?.rejections.length ? "\nRejected / skipped:" : "",
     ...(located?.rejections.map((r) => `  ${r}`) ?? []),
     "",
-    'Fixes: run "pnpm build" in a source checkout, install the optional',
-    `"@zhaowendao2005/usage-report-${TARGET}" package, or set PI_USAGE_MONITOR_BIN to a valid binary.`,
+    DEV
+      ? `Fixes: run "pnpm dev" (Vite + Tauri hot reload), "pnpm build:fast" for a local release binary, or set PI_USAGE_MONITOR_BIN.`
+      : 'Fixes: run "pnpm build" in a source checkout, install the optional',
+    DEV ? "" : `"@zhaowendao2005/usage-report-${TARGET}" package, or set PI_USAGE_MONITOR_BIN to a valid binary.`,
   ];
   return lines.filter(Boolean).join("\n");
 }
@@ -198,16 +273,26 @@ function failureMessage(root: string, located: Located | null, extra?: string): 
  */
 export async function openDashboard(): Promise<{ ok: boolean; message: string }> {
   const root = packageRoot();
-  const located = locateBinary(root);
+  const located = DEV ? await locateDevBinary(root) : locateBinary(root);
 
   if (located?.path) {
     try {
       const child = spawnTarget(located.path);
       child.unref();
-      return { ok: true, message: `Dashboard started: ${located.path}` };
+      return {
+        ok: true,
+        message: `${DEV ? "[dev] " : ""}Dashboard started: ${located.path}`,
+      };
     } catch (err) {
       return { ok: false, message: `Failed to spawn dashboard (${located.path}): ${err}` };
     }
+  }
+
+  if (DEV) {
+    return {
+      ok: false,
+      message: failureMessage(root, located, `no local dashboard binary found${DEV ? " (dev mode never downloads releases)" : ""}`),
+    };
   }
 
   if (process.env.PI_USAGE_SKIP_DOWNLOAD === "1") {

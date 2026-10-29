@@ -58,6 +58,20 @@ pub struct SessionTreeNode {
     pub is_leaf: bool,
     pub has_children: bool,
     pub children_ids: Vec<String>,
+    // --- rewind / branch grouping (see parse_session_tree) ---
+    /// Owning turn/rewind segment (nearest user prompt / branch_summary / root).
+    pub segment_id: String,
+    /// For rewound (nested) segments: the segment they branch out of.
+    pub parent_segment_id: Option<String>,
+    /// True when this segment starts an alternative (rewind/fork) branch.
+    pub is_rewind: bool,
+    /// Entry this rewind branched from (the DAG parent).
+    pub rewind_from_id: Option<String>,
+    /// 1-based position among sibling user prompts (1 = original continuation).
+    pub branch_index: Option<usize>,
+    pub branch_count: Option<usize>,
+    /// Part of the root → current leaf path.
+    pub is_on_active_path: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -547,7 +561,162 @@ fn extract_content_text(content: Option<&Value>) -> String {
     }
 }
 
-/// Parses full session JSONL into hierarchical tree nodes with accurate depth and branching.
+/// Maximum visual nesting for rewound branches. Side entries never add depth,
+/// so this only grows with genuine rewind-of-rewind chains.
+const MAX_TREE_DEPTH: usize = 8;
+
+fn entry_type_of(v: &Value) -> &str {
+    v.get("type").and_then(|s| s.as_str()).unwrap_or("unknown")
+}
+
+fn role_of_entry(v: &Value) -> Option<String> {
+    v.get("message")
+        .and_then(|m| m.get("role"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Bookkeeping entries that must never start a branch or add an indent level.
+/// Extensions (e.g. plannotator) append these as extra siblings of the real
+/// continuation — treating them as branches is what produced the deep role
+/// nesting seen in the old `/tree`-style viewers.
+fn is_side_entry(entry_type: &str) -> bool {
+    matches!(
+        entry_type,
+        "custom"
+            | "custom_message"
+            | "context_edit"
+            | "model_change"
+            | "thinking_level_change"
+            | "label"
+            | "session_info"
+            | "usage"
+    )
+}
+
+fn is_segment_root(entry_type: &str, role: Option<&str>) -> bool {
+    role == Some("user") || entry_type == "branch_summary"
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_tree_node(
+    i: usize,
+    depth: usize,
+    ids: &[String],
+    entries: &[Value],
+    parents: &[Option<String>],
+    dag_children: &[Vec<usize>],
+    entry_types: &[String],
+    branch_index: &[Option<usize>],
+    branch_count: &[Option<usize>],
+    segment_id: String,
+    parent_segment_id: Option<String>,
+    is_rewind: bool,
+    rewind_from_id: Option<String>,
+    is_on_active_path: bool,
+) -> SessionTreeNode {
+    let entry = &entries[i];
+    let entry_type = entry_types[i].as_str();
+    let timestamp = entry
+        .get("timestamp")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+
+    let (summary, status, role, duration_ms, tokens, cost) = build_node_summary(entry, entry_type);
+    let is_user = role.as_deref() == Some("user");
+
+    let role_label = role.clone().unwrap_or_else(|| entry_type.to_string());
+
+    let model = if entry_type == "model_change" {
+        entry
+            .get("modelId")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+    } else {
+        entry
+            .get("message")
+            .and_then(|m| m.get("model"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+    };
+
+    let tool_name = entry
+        .get("message")
+        .and_then(|m| m.get("toolName"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            if role.as_deref() == Some("bashExecution") {
+                Some("bash".to_string())
+            } else {
+                None
+            }
+        });
+
+    let char_count = entry
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .map(|c| extract_content_text(Some(c)).chars().count())
+        .unwrap_or_else(|| summary.chars().count());
+
+    let branch_kind = if status == "error" || status == "aborted" {
+        "error".to_string()
+    } else if is_user {
+        "user".to_string()
+    } else if summary.contains("[thinking]") || entry_type == "thinking_level_change" {
+        "thinking".to_string()
+    } else if role.as_deref() == Some("toolResult") || role.as_deref() == Some("bashExecution") {
+        "tool".to_string()
+    } else if role.as_deref() == Some("assistant") {
+        "assistant".to_string()
+    } else {
+        "system".to_string()
+    };
+
+    SessionTreeNode {
+        id: ids[i].clone(),
+        parent_id: parents[i].clone(),
+        depth,
+        is_branch_point: dag_children[i].len() > 1,
+        branch_kind,
+        entry_type: entry_type.to_string(),
+        timestamp,
+        role,
+        role_label,
+        summary,
+        model,
+        tool_name,
+        char_count,
+        detail: Value::Null, // Cold load: strip heavy detail from tree list
+        status,
+        duration_ms,
+        tokens,
+        cost,
+        is_leaf: dag_children[i].is_empty(),
+        has_children: false,
+        children_ids: Vec::new(),
+        segment_id,
+        parent_segment_id,
+        is_rewind,
+        rewind_from_id: if is_rewind { rewind_from_id } else { None },
+        branch_index: branch_index[i],
+        branch_count: branch_count[i],
+        is_on_active_path,
+    }
+}
+
+/// Parses full session JSONL into a DAG-aware "chat branch" tree.
+///
+/// Model:
+///   1. A *segment* starts at every user prompt, `branch_summary`, or root and
+///      runs along the unique child chain. It is the collapsible turn unit.
+///   2. Depth only changes at **rewinds**: a user prompt that is an alternative
+///      sibling of the main continuation, or a `branch_summary`. Everything
+///      inside a segment — user, assistant, thinking, tool results, extension
+///      `custom` entries, context edits — shares the same depth.
+///   3. Bookkeeping/extension entries never add a level, no matter how the DAG
+///      nests them. This is the key difference to a raw parent/child indent:
+///      "一个 rewind 内无论什么角色都不应该再缩进一个子级别".
 pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> {
     let path = Path::new(file_path);
     if !path.exists() {
@@ -557,236 +726,354 @@ pub fn parse_session_tree(file_path: &str) -> Result<SessionTreeResult, String> 
     let file = File::open(path).map_err(|e| e.to_string())?;
     let reader = BufReader::new(file);
 
-    let mut raw_entries: Vec<Value> = Vec::new();
     let mut session_id = String::new();
     let mut cwd = String::new();
+    let mut entries: Vec<Value> = Vec::new();
+    let mut index_of: HashMap<String, usize> = HashMap::new();
 
     for line in reader.lines().flatten() {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(v) = serde_json::from_str::<Value>(&line) {
-            let t = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
-            if t == "session" {
-                if let Some(id) = v.get("id").and_then(|s| s.as_str()) {
-                    session_id = id.to_string();
-                }
-                if let Some(c) = v.get("cwd").and_then(|s| s.as_str()) {
-                    cwd = c.to_string();
-                }
+        let v = match serde_json::from_str::<Value>(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let t = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
+        if t == "session" {
+            if let Some(id) = v.get("id").and_then(|s| s.as_str()) {
+                session_id = id.to_string();
             }
-            raw_entries.push(v);
-        }
-    }
-
-    // Build children mapping: parent_id -> list of child_ids
-    let mut children_map: HashMap<Option<String>, Vec<String>> = HashMap::new();
-    let mut node_map: HashMap<String, Value> = HashMap::new();
-    let mut id_order: Vec<String> = Vec::new();
-
-    for entry in &raw_entries {
-        let entry_type = entry.get("type").and_then(|s| s.as_str()).unwrap_or("");
-        if entry_type == "session" {
-            // Header is not in the tree itself
+            if let Some(c) = v.get("cwd").and_then(|s| s.as_str()) {
+                cwd = c.to_string();
+            }
             continue;
         }
-        let id = match entry.get("id").and_then(|s| s.as_str()) {
-            Some(i) => i.to_string(),
-            None => continue,
-        };
-        let parent_id = entry.get("parentId").and_then(|s| s.as_str()).map(|s| s.to_string());
-
-        node_map.insert(id.clone(), entry.clone());
-        id_order.push(id.clone());
-        children_map.entry(parent_id).or_default().push(id);
+        if let Some(id) = v.get("id").and_then(|s| s.as_str()) {
+            if !index_of.contains_key(id) {
+                index_of.insert(id.to_string(), entries.len());
+                entries.push(v);
+            }
+        }
     }
 
-    // Determine root IDs (parent_id is None, or parent not present in node_map)
-    let root_ids: Vec<String> = id_order
+    let total_entries = entries.len();
+    if total_entries == 0 {
+        return Ok(SessionTreeResult {
+            session_id,
+            cwd,
+            root_ids: Vec::new(),
+            nodes: Vec::new(),
+            total_nodes: 0,
+        });
+    }
+
+    let ids: Vec<String> = entries
         .iter()
-        .filter(|id| {
-            if let Some(entry) = node_map.get(*id) {
-                let pid = entry.get("parentId").and_then(|s| s.as_str());
-                pid.is_none() || !node_map.contains_key(pid.unwrap())
-            } else {
-                false
-            }
+        .map(|e| {
+            e.get("id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string()
         })
-        .cloned()
+        .collect();
+    let entry_types: Vec<String> = entries
+        .iter()
+        .map(|e| entry_type_of(e).to_string())
         .collect();
 
-    // Turn-based Hierarchical Tree Construction:
-    // 1. User prompts (`role: "user"`) are Turn Roots at Depth 0.
-    // 2. Execution steps inside a turn (thinking, bash, read, edit, assistant, toolResult) are at Depth 1 (single VS Code indent guide).
-    // 3. Pre-session items (model_change, thinking_level, system prompt) are at Depth 0.
-    let mut nodes: Vec<SessionTreeNode> = Vec::new();
-    let mut current_turn_user_idx: Option<usize> = None;
-    let mut current_turn_child_ids: Vec<String> = Vec::new();
+    let mut parents: Vec<Option<String>> = vec![None; total_entries];
+    let mut dag_children: Vec<Vec<usize>> = vec![Vec::new(); total_entries];
+    let mut roots: Vec<usize> = Vec::new();
 
-    for id in &id_order {
-        let entry = match node_map.get(id) {
-            Some(e) => e,
-            None => continue,
-        };
-
-        let entry_type = entry.get("type").and_then(|s| s.as_str()).unwrap_or("unknown");
-        let timestamp = entry.get("timestamp").and_then(|s| s.as_str()).map(|s| s.to_string());
-        let orig_parent_id = entry.get("parentId").and_then(|s| s.as_str()).map(|s| s.to_string());
-
-        let (summary, status, role, duration_ms, tokens, cost) = build_node_summary(entry, entry_type);
-
-        let is_user = role.as_deref() == Some("user");
-
-        let role_label = if let Some(ref r) = role {
-            r.clone()
-        } else {
-            entry_type.to_string()
-        };
-
-        // Extract lightweight metadata for cold-loaded tree
-        let model = if entry_type == "model_change" {
-            entry.get("modelId").and_then(|s| s.as_str()).map(|s| s.to_string())
-        } else {
-            entry
-                .get("message")
-                .and_then(|m| m.get("model"))
-                .and_then(|s| s.as_str())
-                .map(|s| s.to_string())
-        };
-
-        let tool_name = entry
-            .get("message")
-            .and_then(|m| m.get("toolName"))
+    for i in 0..total_entries {
+        let parent_idx = entries[i]
+            .get("parentId")
             .and_then(|s| s.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| {
-                if role.as_deref() == Some("bashExecution") {
-                    Some("bash".to_string())
-                } else {
-                    None
-                }
-            });
+            .and_then(|p| index_of.get(p).copied());
+        match parent_idx {
+            Some(parent_idx) => {
+                parents[i] = Some(ids[parent_idx].clone());
+                dag_children[parent_idx].push(i);
+            }
+            None => roots.push(i),
+        }
+    }
 
-        let char_count = entry
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .map(|c| extract_content_text(Some(c)).chars().count())
-            .unwrap_or_else(|| summary.chars().count());
+    // --- Active path: the last appended entry is the current leaf. ---------
+    let mut active_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let leaf = (0..total_entries)
+        .rev()
+        .find(|&i| dag_children[i].is_empty());
+    if let Some(mut cur) = leaf {
+        loop {
+            if !active_ids.insert(ids[cur].clone()) {
+                break;
+            }
+            match parents[cur].as_ref().and_then(|p| index_of.get(p).copied()) {
+                Some(parent_idx) => cur = parent_idx,
+                None => break,
+            }
+        }
+    }
 
-        let branch_kind = if status == "error" || status == "aborted" {
-            "error".to_string()
-        } else if is_user {
-            "user".to_string()
-        } else if summary.contains("[thinking]") || entry_type == "thinking_level_change" {
-            "thinking".to_string()
-        } else if role.as_deref() == Some("toolResult") || role.as_deref() == Some("bashExecution") {
-            "tool".to_string()
-        } else if role.as_deref() == Some("assistant") {
-            "assistant".to_string()
+    // --- Branch bookkeeping ------------------------------------------------
+    // A branch point does not automatically indent its children: extensions
+    // append bookkeeping entries (`custom`, `context_edit`, ...) as extra
+    // siblings of the real continuation. Only a subtree that actually contains
+    // a new turn/rewind record is treated as an alternative branch.
+    //
+    // Post-order DP ("does this subtree contain a prompt/summary?") using an
+    // explicit stack, so it stays correct for hand-edited or reordered files
+    // and never recurses.
+    let mut has_segment_root: Vec<bool> = vec![false; total_entries];
+    let mut seen = vec![false; total_entries];
+    let mut visit: Vec<(usize, bool)> = Vec::with_capacity(total_entries * 2);
+    for &root in roots.iter().rev() {
+        visit.push((root, false));
+    }
+    while let Some((i, expanded)) = visit.pop() {
+        if expanded {
+            let own = is_segment_root(&entry_types[i], role_of_entry(&entries[i]).as_deref())
+                || parents[i].is_none();
+            has_segment_root[i] =
+                own || dag_children[i].iter().any(|&c| has_segment_root[c]);
+            continue;
+        }
+        if seen[i] {
+            continue;
+        }
+        seen[i] = true;
+        visit.push((i, true));
+        for &child in dag_children[i].iter().rev() {
+            visit.push((child, false));
+        }
+    }
+    // Orphans / cycles: treat them as flat roots.
+    for i in 0..total_entries {
+        if !seen[i] {
+            has_segment_root[i] =
+                is_segment_root(&entry_types[i], role_of_entry(&entries[i]).as_deref())
+                    || parents[i].is_none();
+        }
+    }
+
+    let mut branch_index: Vec<Option<usize>> = vec![None; total_entries];
+    let mut branch_count: Vec<Option<usize>> = vec![None; total_entries];
+    for parent_idx in 0..total_entries {
+        if dag_children[parent_idx].len() < 2 {
+            continue;
+        }
+        let user_children: Vec<usize> = dag_children[parent_idx]
+            .iter()
+            .copied()
+            .filter(|&c| role_of_entry(&entries[c]).as_deref() == Some("user"))
+            .collect();
+        let count = user_children.len();
+        for (pos, &child) in user_children.iter().enumerate() {
+            branch_index[child] = Some(pos + 1);
+            branch_count[child] = Some(count);
+        }
+    }
+
+    // --- DAG traversal -----------------------------------------------------
+    struct Frame {
+        idx: usize,
+        depth: usize,
+        parent_segment: Option<String>,
+        /// Inside an alternative/rewind branch (even if this node itself is a
+        /// bookkeeping row leading to the rewound prompt).
+        nested: bool,
+        /// Entry id of the branch point that produced this rewind branch.
+        rewind_origin: Option<String>,
+        /// This node opens a new segment (root or first row of a rewind
+        /// branch). Bookkeeping rows that merely lead to a rewound prompt are
+        /// included in that rewind segment so the whole branch stays flat.
+        starts_segment: bool,
+        /// `rewind_origin` has not been claimed by a segment root yet. Only the
+        /// first segment of the branch is flagged as a rewind; later turns that
+        /// continue inside the same rewound branch are ordinary turns.
+        rewind_pending: bool,
+    }
+
+    let mut stack: Vec<Frame> = Vec::with_capacity(total_entries);
+    for &root in roots.iter().rev() {
+        stack.push(Frame {
+            idx: root,
+            depth: 0,
+            parent_segment: None,
+            nested: false,
+            rewind_origin: None,
+            starts_segment: true,
+            rewind_pending: false,
+        });
+    }
+
+    let mut visited = vec![false; total_entries];
+    let mut nodes: Vec<SessionTreeNode> = Vec::with_capacity(total_entries);
+
+    while let Some(frame) = stack.pop() {
+        let i = frame.idx;
+        if visited[i] {
+            continue;
+        }
+        visited[i] = true;
+
+        let entry_type = entry_types[i].as_str();
+        let role = role_of_entry(&entries[i]);
+        let seg_root = frame.starts_segment
+            || is_segment_root(entry_type, role.as_deref())
+            || parents[i].is_none();
+        // Put the rewind badge on the first real turn/summary row of the
+        // branch, not on bookkeeping rows that merely lead to it.
+        let is_rewind = seg_root
+            && frame.rewind_pending
+            && (role.as_deref() == Some("user") || entry_type == "branch_summary");
+
+        let segment_id = if seg_root {
+            ids[i].clone()
         } else {
-            "system".to_string()
+            frame
+                .parent_segment
+                .clone()
+                .unwrap_or_else(|| ids[i].clone())
         };
 
-        if is_user {
-            // Finalize previous turn's children
-            if let Some(prev_idx) = current_turn_user_idx {
-                nodes[prev_idx].children_ids = current_turn_child_ids.clone();
-                nodes[prev_idx].has_children = !current_turn_child_ids.is_empty();
-                nodes[prev_idx].is_leaf = current_turn_child_ids.is_empty();
-            }
-
-            // Start new Turn
-            current_turn_child_ids.clear();
-            let new_node_idx = nodes.len();
-            current_turn_user_idx = Some(new_node_idx);
-
-            nodes.push(SessionTreeNode {
-                id: id.clone(),
-                parent_id: orig_parent_id,
-                depth: 0,
-                is_branch_point: false,
-                branch_kind,
-                entry_type: entry_type.to_string(),
-                timestamp,
-                role,
-                role_label,
-                summary,
-                model,
-                tool_name,
-                char_count,
-                detail: Value::Null, // Cold load: strip heavy detail from tree list
-                status,
-                duration_ms,
-                tokens,
-                cost,
-                is_leaf: true, // updated when children are finalized
-                has_children: false,
-                children_ids: Vec::new(),
-            });
-        } else if let Some(turn_idx) = current_turn_user_idx {
-            // Execution step inside current Turn (single clean depth = 1)
-            let turn_user_id = nodes[turn_idx].id.clone();
-            current_turn_child_ids.push(id.clone());
-
-            nodes.push(SessionTreeNode {
-                id: id.clone(),
-                parent_id: Some(turn_user_id),
-                depth: 1,
-                is_branch_point: true,
-                branch_kind,
-                entry_type: entry_type.to_string(),
-                timestamp,
-                role,
-                role_label,
-                summary,
-                model,
-                tool_name,
-                char_count,
-                detail: Value::Null, // Cold load
-                status,
-                duration_ms,
-                tokens,
-                cost,
-                is_leaf: true,
-                has_children: false,
-                children_ids: Vec::new(),
-            });
+        let parent_segment_id = if seg_root && (is_rewind || frame.nested) {
+            frame.parent_segment.clone()
         } else {
-            // Pre-turn initial configuration (model, thinking level, system prompt)
-            nodes.push(SessionTreeNode {
-                id: id.clone(),
-                parent_id: orig_parent_id,
-                depth: 0,
-                is_branch_point: false,
-                branch_kind,
-                entry_type: entry_type.to_string(),
-                timestamp,
-                role,
-                role_label,
-                summary,
-                model,
-                tool_name,
-                char_count,
-                detail: Value::Null, // Cold load
-                status,
-                duration_ms,
-                tokens,
-                cost,
-                is_leaf: true,
-                has_children: false,
-                children_ids: Vec::new(),
+            None
+        };
+
+        let on_active = active_ids.contains(&ids[i]);
+
+        nodes.push(build_tree_node(
+            i,
+            frame.depth,
+            &ids,
+            &entries,
+            &parents,
+            &dag_children,
+            &entry_types,
+            &branch_index,
+            &branch_count,
+            segment_id.clone(),
+            parent_segment_id,
+            is_rewind,
+            frame.rewind_origin.clone(),
+            on_active,
+        ));
+
+        let child_idxs = &dag_children[i];
+        // Main continuation: first non-bookkeeping child, falling back to the
+        // first child when a chain consists solely of bookkeeping rows.
+        let main_child = child_idxs
+            .iter()
+            .copied()
+            .find(|&c| !is_side_entry(&entry_types[c]))
+            .or_else(|| child_idxs.first().copied());
+
+        for &child in child_idxs.iter().rev() {
+            let is_summary = entry_types[child] == "branch_summary";
+            // Non-main continuation that eventually reaches a new prompt is a
+            // genuine rewind branch. Pure bookkeeping siblings stay flat.
+            let alternative_branch =
+                child_idxs.len() > 1 && Some(child) != main_child && has_segment_root[child];
+            let child_rewind = is_summary || alternative_branch;
+
+            let child_depth = if child_rewind {
+                (frame.depth + 1).min(MAX_TREE_DEPTH)
+            } else {
+                frame.depth
+            };
+            let child_origin = if child_rewind {
+                Some(ids[i].clone())
+            } else {
+                frame.rewind_origin.clone()
+            };
+            let child_pending = if child_rewind {
+                true
+            } else if is_rewind {
+                false
+            } else {
+                frame.rewind_pending
+            };
+
+            stack.push(Frame {
+                idx: child,
+                depth: child_depth,
+                parent_segment: Some(segment_id.clone()),
+                nested: frame.nested || child_rewind,
+                rewind_origin: child_origin,
+                starts_segment: child_rewind,
+                rewind_pending: child_pending,
             });
         }
     }
 
-    // Finalize last turn
-    if let Some(last_idx) = current_turn_user_idx {
-        nodes[last_idx].children_ids = current_turn_child_ids;
-        nodes[last_idx].has_children = !nodes[last_idx].children_ids.is_empty();
-        nodes[last_idx].is_leaf = nodes[last_idx].children_ids.is_empty();
+    // Safety net for orphans / cycles: show them flat at the end.
+    for i in 0..total_entries {
+        if visited[i] {
+            continue;
+        }
+        let on_active = active_ids.contains(&ids[i]);
+        nodes.push(build_tree_node(
+            i,
+            0,
+            &ids,
+            &entries,
+            &parents,
+            &dag_children,
+            &entry_types,
+            &branch_index,
+            &branch_count,
+            ids[i].clone(),
+            None,
+            false,
+            None,
+            on_active,
+        ));
     }
 
+    // --- Segment step lists (collapse + "N 步" badge) ----------------------
+    let mut segment_children: HashMap<String, Vec<usize>> = HashMap::new();
+    for (pos, node) in nodes.iter().enumerate() {
+        if node.segment_id != node.id {
+            segment_children
+                .entry(node.segment_id.clone())
+                .or_default()
+                .push(pos);
+        }
+    }
+    let segment_child_ids: HashMap<String, Vec<String>> = segment_children
+        .iter()
+        .map(|(seg, positions)| {
+            (
+                seg.clone(),
+                positions.iter().map(|&p| nodes[p].id.clone()).collect(),
+            )
+        })
+        .collect();
+
+    for node in nodes.iter_mut() {
+        if node.segment_id != node.id {
+            continue;
+        }
+        // Only real turn/rewind roots are collapsible; pre-session bookkeeping
+        // roots stay as flat rows so collapsing them can't hide the session.
+        if node.role.as_deref() != Some("user") && !node.is_rewind {
+            continue;
+        }
+        if let Some(child_ids) = segment_child_ids.get(&node.id) {
+            node.children_ids = child_ids.clone();
+            node.has_children = !node.children_ids.is_empty();
+            node.is_leaf = node.children_ids.is_empty();
+        }
+    }
+
+    let root_ids = roots.iter().map(|&i| ids[i].clone()).collect();
     let total_nodes = nodes.len();
+
     Ok(SessionTreeResult {
         session_id,
         cwd,
@@ -1171,14 +1458,116 @@ mod tests {
                         for n in &tree.nodes {
                             // Verify cold-load: tree nodes do not carry bulky detail JSON
                             assert!(n.detail.is_null());
-                            // Verify single indent level (depth <= 1)
-                            assert!(n.depth <= 1);
+                            // Rewind nesting is capped and always has a segment.
+                            assert!(n.depth <= MAX_TREE_DEPTH);
+                            assert!(!n.segment_id.is_empty());
+                        }
+
+                        // Invariant: everything inside one rewind/turn segment
+                        // shares the same visual depth (no per-role nesting).
+                        let mut segment_depth: HashMap<&str, usize> = HashMap::new();
+                        for n in &tree.nodes {
+                            match segment_depth.get(n.segment_id.as_str()) {
+                                Some(&d) => assert_eq!(d, n.depth, "segment depth drift in {}", n.segment_id),
+                                None => {
+                                    segment_depth.insert(n.segment_id.as_str(), n.depth);
+                                }
+                            }
+                        }
+
+                        // Every node's parent segment (when set) must exist.
+                        let ids: std::collections::HashSet<&str> =
+                            tree.nodes.iter().map(|n| n.id.as_str()).collect();
+                        for n in &tree.nodes {
+                            if let Some(p) = &n.parent_segment_id {
+                                assert!(ids.contains(p.as_str()), "dangling parent segment {p}");
+                            }
                         }
                     }
                     Err(e) => println!("  Parse err: {}", e),
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_rewind_segments_stay_flat() {
+        // m1 (settings) -> u1 -> a1 -> t1 -> c1 (extension side entry)
+        //                       \-> sc1 (side entry) -> u2 (rewind) -> a2 -> c2 -> bs1
+        //                                                        \-> u3 -> a3
+        let dir = std::env::temp_dir().join(format!("pi-usage-report-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("rewind.jsonl");
+        let lines = [
+            r#"{"type":"session","id":"s1","cwd":"/tmp"}"#,
+            r#"{"type":"model_change","id":"m1","parentId":null,"modelId":"m"}"#,
+            r#"{"type":"message","id":"u1","parentId":"m1","message":{"role":"user","content":"first"}}"#,
+            r#"{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[{"type":"text","text":"resp1"}]}}"#,
+            r#"{"type":"message","id":"t1","parentId":"a1","message":{"role":"toolResult","toolName":"bash","content":"ok"}}"#,
+            r#"{"type":"custom","id":"c1","parentId":"t1","customType":"plannotator","data":{}}"#,
+            r#"{"type":"custom","id":"sc1","parentId":"a1","customType":"plannotator","data":{}}"#,
+            r#"{"type":"message","id":"u2","parentId":"sc1","message":{"role":"user","content":"rewound"}}"#,
+            r#"{"type":"message","id":"a2","parentId":"u2","message":{"role":"assistant","content":[{"type":"text","text":"resp2"}]}}"#,
+            r#"{"type":"custom","id":"c2","parentId":"a2","customType":"plannotator","data":{}}"#,
+            r#"{"type":"branch_summary","id":"bs1","parentId":"a2","fromId":"c2","summary":"left branch"}"#,
+            r#"{"type":"message","id":"u3","parentId":"bs1","message":{"role":"user","content":"after summary"}}"#,
+            r#"{"type":"message","id":"a3","parentId":"u3","message":{"role":"assistant","content":[{"type":"text","text":"resp3"}]}}"#,
+        ];
+        std::fs::write(&file, lines.join("\n")).unwrap();
+
+        let tree = parse_session_tree(file.to_str().unwrap()).unwrap();
+        let by_id: HashMap<&str, &SessionTreeNode> =
+            tree.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+
+        assert_eq!(by_id["m1"].depth, 0);
+        assert_eq!(by_id["m1"].segment_id, "m1");
+        for id in ["u1", "a1", "t1", "c1"] {
+            assert_eq!(by_id[id].depth, 0, "{id} should stay flat");
+            assert_eq!(by_id[id].segment_id, "u1", "{id} should belong to turn u1");
+        }
+
+        // sc1 is a bookkeeping sibling that leads to a rewound prompt: the
+        // branch is flattened to depth 1, but the ⟲ badge stays on the prompt.
+        assert_eq!(by_id["sc1"].depth, 1);
+        assert_eq!(by_id["sc1"].segment_id, "sc1");
+        assert!(!by_id["sc1"].is_rewind);
+        assert_eq!(by_id["sc1"].parent_segment_id.as_deref(), Some("u1"));
+
+        // u2 is an alternative user prompt behind sc1 -> a rewound segment.
+        assert!(by_id["u2"].is_rewind);
+        assert_eq!(by_id["u2"].depth, 1);
+        assert_eq!(by_id["u2"].rewind_from_id.as_deref(), Some("a1"));
+        // Every role in the rewound segment keeps the segment depth.
+        assert_eq!(by_id["a2"].depth, 1);
+        assert_eq!(by_id["c2"].depth, 1);
+        assert_eq!(by_id["a2"].segment_id, "u2");
+
+        // branch_summary is a rewind record and the following turn stays inside
+        // its nested segment instead of nesting again. Because a2 already lives
+        // inside the rewound segment u2, this is a rewind-of-rewind (+1 again).
+        assert!(by_id["bs1"].is_rewind);
+        assert_eq!(by_id["bs1"].depth, 2);
+        assert_eq!(by_id["bs1"].rewind_from_id.as_deref(), Some("a2"));
+        assert_eq!(by_id["u3"].depth, 2);
+        assert_eq!(by_id["u3"].parent_segment_id.as_deref(), Some("bs1"));
+        assert_eq!(by_id["a3"].depth, 2);
+
+        // Turn/rewind roots expose their steps for collapse + badge counts.
+        assert_eq!(by_id["u1"].children_ids, vec!["a1", "t1", "c1"]);
+        assert_eq!(by_id["u2"].children_ids, vec!["a2", "c2"]);
+        assert!(by_id["u1"].has_children);
+
+        // Active path comes from the last entry (a3).
+        assert!(by_id["a3"].is_on_active_path);
+        assert!(by_id["u1"].is_on_active_path);
+        assert!(!by_id["t1"].is_on_active_path);
+
+        // Side entries never become collapsible parents.
+        assert!(!by_id["c1"].has_children);
+        assert!(!by_id["c2"].has_children);
+
+        std::fs::remove_file(&file).ok();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

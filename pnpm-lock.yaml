@@ -190,6 +190,19 @@ importers:
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+    optionalDependencies:
+      '@zhaowendao2005/usage-report-darwin-arm64':
+        specifier: 0.2.2
+        version: 0.2.2
+      '@zhaowendao2005/usage-report-darwin-x64':
+        specifier: 0.2.2
+        version: 0.2.2
+      '@zhaowendao2005/usage-report-linux-x64':
+        specifier: 0.2.2
+        version: 0.2.2
+      '@zhaowendao2005/usage-report-win32-x64':
+        specifier: 0.2.2
+        version: 0.2.2
 
 packages:
 
@@ -467,6 +480,27 @@ packages:
 
   '@types/retry@0.12.0':
     resolution: {integrity: sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA==}
+
+  '@zhaowendao2005/usage-report-darwin-arm64@0.2.2':
+    resolution: {integrity: sha512-gPNizG53Ntn0YbafMtl/XJoqpufQzSZJDsUswDX7V9sMAEc1v/hBJEgjdywhQgAO7qW7yxWewdODcmq5E/svRA==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@zhaowendao2005/usage-report-darwin-x64@0.2.2':
+    resolution: {integrity: sha512-ZFCvmdQVwvR+nkt1hTE6n2rJGp1zsZNBvmAf1M+ji0jCiC7dvyZwBOxSoQEq03iHPATAg5p2I5ZpE6XDrwChcA==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@zhaowendao2005/usage-report-linux-x64@0.2.2':
+    resolution: {integrity: sha512-NBRtsMWzURyaZ5t9eQnO9l5QHa4ZIkIl0ESd/fPB0DezSShpFt24aFXrce2mtqYtWvBhh7kcaL6wKvOY8S4eig==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@zhaowendao2005/usage-report-win32-x64@0.2.2':
+    resolution: {integrity: sha512-BeLg9xOatielRSOyPIjdz2eMFIOB8BNxnfBRWwcXZwUWY0TwzS7YLtHA8G6t4jwMrhkSPsIlyfHkRFm6eiyzKw==}
+    cpu: [x64]
+    os: [win32]
 
   agent-base@7.1.4:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
@@ -1187,6 +1221,18 @@ snapshots:
       undici-types: 6.21.0
 
   '@types/retry@0.12.0': {}
+
+  '@zhaowendao2005/usage-report-darwin-arm64@0.2.2':
+    optional: true
+
+  '@zhaowendao2005/usage-report-darwin-x64@0.2.2':
+    optional: true
+
+  '@zhaowendao2005/usage-report-linux-x64@0.2.2':
+    optional: true
+
+  '@zhaowendao2005/usage-report-win32-x64@0.2.2':
+    optional: true
 
   agent-base@7.1.4: {}
 

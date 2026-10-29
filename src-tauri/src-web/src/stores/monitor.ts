@@ -45,6 +45,20 @@ export interface SessionTreeNode {
   isLeaf: boolean
   hasChildren: boolean
   childrenIds: string[]
+  // --- rewind / branch grouping (Rust parse_session_tree) ---
+  /** Owning turn/rewind segment (user prompt, branch_summary or session root). */
+  segmentId?: string
+  /** For nested rewind branches: the segment they branch out of. */
+  parentSegmentId?: string | null
+  /** True when this segment starts an alternative (rewind/fork) branch. */
+  isRewind?: boolean
+  /** Entry this rewind branched from (the DAG parent). */
+  rewindFromId?: string | null
+  /** 1-based position among sibling user prompts (1 = original continuation). */
+  branchIndex?: number | null
+  branchCount?: number | null
+  /** Part of the root → current leaf path. */
+  isOnActivePath?: boolean
 }
 
 export interface SessionTreeResult {
@@ -240,22 +254,17 @@ export const useMonitorStore = defineStore('monitor', () => {
     return sessionTree.value.nodes.find((n) => n.id === activeNodeId.value) ?? null
   })
 
-  // Visible flattened nodes accounting for collapsed parent nodes
+  // Visible flattened nodes accounting for collapsed turn/rewind segments.
+  // Rust nodes carry real DAG parentIds plus a segmentId. Collapsing a segment
+  // hides its own step rows; rewind branch roots stay visible so the branch
+  // structure never disappears behind a collapsed turn.
   const visibleNodes = computed(() => {
     if (!sessionTree.value) return []
     const collapsed = collapsedNodeIds.value
-    const nodes = sessionTree.value.nodes
-
-    const hiddenAncestorIds = new Set<string>(collapsed)
-    const hiddenNodeIds = new Set<string>()
-
-    for (const node of nodes) {
-      if (node.parentId && (hiddenAncestorIds.has(node.parentId) || hiddenNodeIds.has(node.parentId))) {
-        hiddenNodeIds.add(node.id)
-      }
-    }
-
-    return nodes.filter((n) => !hiddenNodeIds.has(n.id))
+    return sessionTree.value.nodes.filter((node) => {
+      const seg = node.segmentId ?? node.id
+      return seg === node.id || !collapsed.has(seg)
+    })
   })
 
   // --- Actions ---
@@ -400,6 +409,17 @@ export const useMonitorStore = defineStore('monitor', () => {
     }
   }
 
+  /** Latest user turn, preferring the active branch (root → current leaf). */
+  function pickDefaultNode(tree: SessionTreeResult): string | null {
+    const users = tree.nodes.filter((n) => n.role === 'user')
+    if (users.length === 0) {
+      return tree.nodes.length > 0 ? tree.nodes[tree.nodes.length - 1].id : null
+    }
+    const activeUsers = users.filter((n) => n.isOnActivePath)
+    const pool = activeUsers.length > 0 ? activeUsers : users
+    return pool[pool.length - 1].id
+  }
+
   function applyDefaultCollapse(tree: SessionTreeResult) {
     const set = new Set<string>()
     for (const node of tree.nodes) {
@@ -508,21 +528,13 @@ export const useMonitorStore = defineStore('monitor', () => {
         sessionTree.value = tree
         // Default collapse all execution branches as requested
         applyDefaultCollapse(tree)
-        // Select last top-level turn node by default
-        const roots = tree.nodes.filter((n) => n.depth === 0)
-        if (roots.length > 0) {
-          activeNodeId.value = roots[roots.length - 1].id
-        } else if (tree.nodes.length > 0) {
-          activeNodeId.value = tree.nodes[tree.nodes.length - 1].id
-        }
+        // Prefer the latest user turn on the active (root → current leaf) path.
+        activeNodeId.value = pickDefaultNode(tree)
       } else {
         const mockTree = createMockSessionTree(session.id)
         sessionTree.value = mockTree
         applyDefaultCollapse(mockTree)
-        const roots = mockTree.nodes.filter((n) => n.depth === 0)
-        if (roots.length > 0) {
-          activeNodeId.value = roots[roots.length - 1].id
-        }
+        activeNodeId.value = pickDefaultNode(mockTree)
       }
       // Poll telemetry immediately for the newly selected session
       await pollTelemetryOnce()
@@ -633,6 +645,30 @@ export const useMonitorStore = defineStore('monitor', () => {
     collapsedNodeIds.value = next
   }
 
+  /** Expand the node's own segment and every ancestor segment so it becomes visible. */
+  function expandToNode(nodeId: string) {
+    if (!sessionTree.value) return
+    const nodes = sessionTree.value.nodes
+    const node = nodes.find((n) => n.id === nodeId)
+    if (!node) return
+
+    const parentSegment = new Map<string, string | null>()
+    for (const n of nodes) {
+      const seg = n.segmentId ?? n.id
+      if (seg === n.id) parentSegment.set(n.id, n.parentSegmentId ?? null)
+    }
+
+    const next = new Set(collapsedNodeIds.value)
+    const seen = new Set<string>()
+    let seg: string | null = node.segmentId ?? node.id
+    while (seg && !seen.has(seg)) {
+      next.delete(seg)
+      seen.add(seg)
+      seg = parentSegment.get(seg) ?? null
+    }
+    collapsedNodeIds.value = next
+  }
+
   function setHoveredNode(node: SessionTreeNode | null) {
     hoveredNodeId.value = node ? node.id : null
     if (!node || !sessionTree.value) {
@@ -702,6 +738,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     startLivePolling,
     stopLivePolling,
     toggleNodeCollapse,
+    expandToNode,
     setHoveredNode,
   }
 })
@@ -983,7 +1020,7 @@ function createMockWorkspaces(includeAll = false): WorkspaceItem[] {
   ]
 }
 
-function createMockSessionTree(sessionId: string): SessionTreeResult {
+function createMockSessionTreeRaw(sessionId: string): SessionTreeResult {
   const t1_children = ['step_t1_1', 'step_t1_2', 'step_t1_3', 'step_t1_4', 'step_t1_5']
   const t2_children = ['step_t2_1', 'step_t2_2', 'step_t2_3', 'step_t2_4', 'step_t2_5', 'step_t2_6']
   const t3_children = ['step_t3_1', 'step_t3_2', 'step_t3_3']
@@ -1374,4 +1411,38 @@ function createMockSessionTree(sessionId: string): SessionTreeResult {
       },
     ],
   }
+}
+
+function createMockSessionTree(sessionId: string): SessionTreeResult {
+  const tree = createMockSessionTreeRaw(sessionId)
+  for (const node of tree.nodes) {
+    node.segmentId = node.role === 'user' ? node.id : node.parentId ?? node.id
+    node.parentSegmentId = null
+    node.isRewind = false
+    node.rewindFromId = null
+    node.branchIndex = null
+    node.branchCount = null
+    node.isOnActivePath = true
+  }
+
+  // Browser-only demo of the rewind representation: turn 2 is a branch from
+  // step 2 of turn 1, and turn 3 continues inside that rewound branch.
+  for (const node of tree.nodes) {
+    if (node.id === 'turn_2') {
+      node.parentId = 'step_t1_2'
+      node.depth = 1
+      node.parentSegmentId = 'turn_1'
+      node.isRewind = true
+      node.rewindFromId = 'step_t1_2'
+      node.branchIndex = 2
+      node.branchCount = 2
+      node.isOnActivePath = true
+    }
+    if (node.id === 'turn_3' || node.id.startsWith('step_t3_')) {
+      node.depth = 1
+      node.parentSegmentId = node.id === 'turn_3' ? 'turn_2' : 'turn_3'
+      if (node.id === 'turn_3') node.parentId = 'step_t2_6'
+    }
+  }
+  return tree
 }

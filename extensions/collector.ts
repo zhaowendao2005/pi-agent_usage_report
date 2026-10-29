@@ -181,6 +181,7 @@ export class UsageCollector {
   private lastPhase = "idle";
   private lastModel: string | null = null;
   private lastProvider: string | null = null;
+  private attached = false;
 
   private writeActiveTurnPayload(state: {
     isActive: boolean;
@@ -288,16 +289,29 @@ export class UsageCollector {
     this.activeSyncTimer.unref?.();
   }
 
+  /**
+   * Initialize state for the current session. Public so the extension entry
+   * point can call it when the leader is elected during `session_start`
+   * (the collector's own `session_start` handler is attached at that point and
+   * must not rely on the in-flight event being re-dispatched).
+   */
+  onSessionStart(ctx: ExtensionContext): void {
+    this.refreshSession(ctx);
+    try {
+      usageDb.open();
+    } catch (err) {
+      console.error("[usage-report] failed to open db:", err);
+    }
+    this.resetLiveStream();
+    this.resetTurnTiming();
+  }
+
   attach(pi: ExtensionAPI): void {
+    if (this.attached) return;
+    this.attached = true;
+
     pi.on("session_start", async (_event, ctx) => {
-      this.refreshSession(ctx);
-      try {
-        usageDb.open();
-      } catch (err) {
-        console.error("[usage-report] failed to open db:", err);
-      }
-      this.resetLiveStream();
-      this.resetTurnTiming();
+      this.onSessionStart(ctx);
     });
 
     pi.on("session_shutdown", async (_event, ctx) => {
