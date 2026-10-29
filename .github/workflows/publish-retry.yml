@@ -75,6 +75,17 @@ jobs:
           merge-multiple: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: check npm credentials
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is missing — Settings → Secrets and variables → Actions → New repository secret, name NPM_TOKEN (npm Automation token with 2FA bypass)"
+            exit 1
+          fi
+          echo "npm user: $(npm whoami)"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       # binaries come from artifacts, the JS payload is rebuilt from the tag
       - name: build extension payload
         run: node scripts/build.mjs --extension-only

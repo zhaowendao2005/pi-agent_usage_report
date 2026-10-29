@@ -47,6 +47,12 @@ const noPlatform = args.includes("--no-platform");
 const universal = args.includes("--universal") && process.platform === "darwin";
 const intel = args.includes("--intel") && process.platform === "darwin";
 
+// An empty APPLE_SIGNING_IDENTITY (e.g. an unset CI secret) must mean "do not sign",
+// otherwise tauri runs `codesign --sign ""` and the bundle fails.
+if ("APPLE_SIGNING_IDENTITY" in process.env && !process.env.APPLE_SIGNING_IDENTITY?.trim()) {
+  delete process.env.APPLE_SIGNING_IDENTITY;
+}
+
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const BIN = binName();
 

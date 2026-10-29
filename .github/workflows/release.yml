@@ -127,9 +127,9 @@ jobs:
 
       - name: build
         run: ${{ matrix.build }}
-        env:
-          # optional: provide APPLE_SIGNING_IDENTITY to get a stable TCC identity for the .app
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        # NOTE: do NOT put `APPLE_SIGNING_IDENTITY: ${{ secrets.X }}` here unless the
+        # secret actually exists — an unset secret becomes an empty string, which tauri
+        # takes as "sign with identity ''" and codesign fails on an empty keychain item.
 
       - uses: actions/upload-artifact@v4
         with:
@@ -162,6 +162,17 @@ jobs:
         with:
           pattern: payload-*
           merge-multiple: true
+
+      - name: check npm credentials
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is missing — Settings → Secrets and variables → Actions → New repository secret, name NPM_TOKEN (npm Automation token with 2FA bypass)"
+            exit 1
+          fi
+          echo "npm user: $(npm whoami)"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # the JS payload must be produced from this tag; binaries come from the artifacts above
       - name: build extension payload
