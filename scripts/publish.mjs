@@ -51,6 +51,9 @@ function npm(argv, cwd = root, { silent = false } = {}) {
     encoding: "utf8",
     shell: process.platform === "win32",
     stdio: silent ? "pipe" : "inherit",
+    // this script *is* the sanctioned publish path, so it may lift the
+    // prepublishOnly guard that stops a bare `npm publish`
+    env: { ...process.env, ALLOW_LOCAL_PUBLISH: "1" },
   });
   return r;
 }

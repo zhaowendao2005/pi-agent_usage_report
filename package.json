@@ -52,7 +52,8 @@
     "build:universal": "node scripts/build.mjs --universal",
     "build:intel": "node scripts/build.mjs --intel",
     "publish:npm": "node scripts/publish.mjs",
-    "build:ext": "node scripts/build.mjs --extension-only"
+    "build:ext": "node scripts/build.mjs --extension-only",
+    "prepublishOnly": "node scripts/guard-publish.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
