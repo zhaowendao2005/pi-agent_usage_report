@@ -76,7 +76,9 @@ export function downloadUrl(version: string | null): string {
   const base =
     process.env.PI_USAGE_DOWNLOAD_BASE ??
     (version ? `https://github.com/zhaowendao2005/pi-agent_usage_report/releases/download/v${version}` : "");
-  return `${base.replace(/\/$/, "")}/${BIN}-${TARGET}`;
+  // keep in sync with scripts/lib/platform.mjs (assetName)
+  const ext = platform() === "win32" ? ".exe" : "";
+  return `${base.replace(/\/$/, "")}/pi-usage-monitor-${TARGET}${ext}`;
 }
 
 export function candidateBins(root = packageRoot()): string[] {

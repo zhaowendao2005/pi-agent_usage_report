@@ -59,10 +59,19 @@ export const ALL_TARGETS = [
   "linux-arm64",
 ];
 
+/**
+ * GitHub Release asset name for a target. Must stay unique across platforms
+ * (plain `pi-usage-monitor` collides 3×) and must match what the runtime
+ * downloader asks for in extensions/spawn.ts.
+ */
+export function assetName(target = TARGET) {
+  return `pi-usage-monitor-${target}${target.startsWith("win32-") ? ".exe" : ""}`;
+}
+
 /** GitHub release asset URL for a given version + target. */
 export function releaseAssetUrl(version, target = TARGET, base = process.env.PI_USAGE_DOWNLOAD_BASE) {
   const root =
     base ??
     `https://github.com/zhaowendao2005/pi-agent_usage_report/releases/download/v${version}`;
-  return `${root.replace(/\/$/, "")}/${binName(target)}-${target}`;
+  return `${root.replace(/\/$/, "")}/${assetName(target)}`;
 }

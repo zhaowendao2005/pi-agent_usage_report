@@ -45,6 +45,7 @@ import {
   osCpu,
   platformDirName,
   platformPackageName,
+  assetName,
 } from "./lib/platform.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -139,7 +140,7 @@ for (const target of stageTargets) {
   cpSync(releaseBin, dest);
   chmodSync(dest, 0o755);
   // sidecar consumed by the runtime downloader (see extensions/spawn.ts)
-  writeFileSync(`${dest}.sha256`, `${sha256}  ${binName(target)}-${target}\n`);
+  writeFileSync(`${dest}.sha256`, `${sha256}  ${assetName(target)}\n`);
   console.log(`→ staged ${target}: ${dest}`);
 }
 
@@ -185,7 +186,7 @@ if (!noPlatform) {
     const dest = join(dir, "bin", binName(target));
     cpSync(releaseBin, dest);
     chmodSync(dest, 0o755);
-    writeFileSync(`${dest}.sha256`, `${sha256}  ${binName(target)}-${target}\n`);
+    writeFileSync(`${dest}.sha256`, `${sha256}  ${assetName(target)}\n`);
 
     const { os, cpu } = osCpu(target);
     writeFileSync(

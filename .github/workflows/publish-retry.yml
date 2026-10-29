@@ -110,17 +110,37 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: publish GitHub Release (download fallback)
+      - name: stage release assets
+        if: inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          rm -rf release-assets && mkdir -p release-assets
+          for dir in dist/bin/*/; do
+            target=$(basename "$dir")
+            case "$target" in win32-*) ext=".exe" ;; *) ext="" ;; esac
+            src="$dir/pi-usage-monitor$ext"
+            [ -f "$src" ] || continue
+            # assets must be uniquely named *and* match what the runtime downloader
+            # asks for (pi-usage-monitor-<target>), see scripts/lib/platform.mjs
+            name="pi-usage-monitor-$target$ext"
+            cp "$src" "release-assets/$name"
+            if [ -f "$src.sha256" ]; then cp "$src.sha256" "release-assets/$name.sha256"; fi
+            echo "  + $name"
+          done
+          ( cd release-assets && sha256sum pi-usage-monitor-* > checksums.txt )
+          ls -l release-assets
+
+      - name: publish GitHub Release (download fallback + standalone binary)
         if: inputs.dry_run != true
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG already exists — uploading missing assets"
-            gh release upload "$TAG" dist/bin/*/pi-usage-monitor* --clobber
+            echo "release $TAG exists — uploading/refreshing assets"
+            gh release upload "$TAG" release-assets/* --clobber
           else
             gh release create "$TAG" --title "$TAG" \
-              --notes "See commit history for details." \
-              dist/bin/*/pi-usage-monitor*
+              --notes "Standalone binaries and checksums. npm is the primary distribution channel." \
+              release-assets/*
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
