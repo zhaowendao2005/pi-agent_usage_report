@@ -109,3 +109,18 @@ jobs:
           node scripts/publish.mjs "${ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: publish GitHub Release (download fallback)
+        if: inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists — uploading missing assets"
+            gh release upload "$TAG" dist/bin/*/pi-usage-monitor* --clobber
+          else
+            gh release create "$TAG" --title "$TAG" \
+              --notes "See commit history for details." \
+              dist/bin/*/pi-usage-monitor*
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
