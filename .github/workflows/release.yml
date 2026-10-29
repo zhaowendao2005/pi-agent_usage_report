@@ -1,0 +1,188 @@
+name: release
+
+# Triggered by `pnpm release` (which pushes an annotated tag v<version>).
+#
+#   guard  → tag must equal package.json.version, and that version must be unpublished
+#   build  → one job per platform, artifacts only (this is the ONLY place binaries are made)
+#   publish→ downloads those exact artifacts, publishes platform packages then the main
+#            package to npm, then creates the GitHub Release with the same binaries
+#
+# Nothing here ever changes the version: package.json + the tag are the single source of truth.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build and publish, e.g. v0.2.0'
+        required: true
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the GitHub Release
+  id-token: write # npm provenance / trusted publishing
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  guard:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - id: v
+        name: tag == package.json version
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${TAG#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          echo "tag=$TAG_VERSION package.json=$PKG_VERSION"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::tag $TAG is v$TAG_VERSION but package.json says $PKG_VERSION — bump package.json first"
+            exit 1
+          fi
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: version must not be on npm yet
+        run: |
+          set -euo pipefail
+          if npm view "usage-report@${{ steps.v.outputs.version }}" version >/dev/null 2>&1; then
+            echo "::error::usage-report@${{ steps.v.outputs.version }} is already published — npm versions are immutable, bump package.json"
+            exit 1
+          fi
+          echo "✓ usage-report@${{ steps.v.outputs.version }} is unpublished"
+
+  build:
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # one macOS job covers both darwin targets (universal binary → two npm payloads)
+          - os: macos-14
+            name: darwin
+            build: pnpm build:universal
+            paths: |
+              dist/bin/darwin-*
+              packages/usage-report-darwin-*
+          - os: windows-latest
+            name: win32-x64
+            build: node scripts/build.mjs
+            paths: |
+              dist/bin/win32-x64
+              packages/usage-report-win32-x64
+          - os: ubuntu-22.04
+            name: linux-x64
+            build: node scripts/build.mjs
+            paths: |
+              dist/bin/linux-x64
+              packages/usage-report-linux-x64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: install (root)
+        run: pnpm install --frozen-lockfile
+
+      - name: install (frontend)
+        run: npm --prefix src-tauri/src-web ci --no-audit --no-fund
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: add x86_64-apple-darwin
+        if: matrix.name == 'darwin'
+        run: rustup target add x86_64-apple-darwin
+
+      - name: tauri build deps (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.name }}
+
+      - name: build
+        run: ${{ matrix.build }}
+        env:
+          # optional: provide APPLE_SIGNING_IDENTITY to get a stable TCC identity for the .app
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payload-${{ matrix.name }}
+          path: ${{ matrix.paths }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: [guard, build]
+    runs-on: ubuntu-22.04
+    # requires a GitHub Environment with required reviewers → the manual gate on npm
+    environment:
+      name: npm-publish
+      url: https://www.npmjs.com/package/usage-report
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: install (root, no scripts — publishing only)
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # binaries come from the build jobs, never rebuilt here
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: payload-*
+          merge-multiple: true
+
+      # the JS payload must be produced from this tag; binaries come from the artifacts above
+      - name: build extension payload
+        run: node scripts/build.mjs --extension-only
+
+      - name: publish (platform packages → main package)
+        run: node scripts/publish.mjs --expect-version "${{ needs.guard.outputs.version }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # with npm trusted publishing configured, delete NPM_TOKEN and this still works
+
+      - name: publish GitHub Release (download fallback + standalone binary)
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "See CHANGELOG / commit history for details." \
+            dist/bin/*/pi-usage-monitor* 
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

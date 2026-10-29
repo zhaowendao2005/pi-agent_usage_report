@@ -1,9 +1,15 @@
 {
   "name": "usage-report",
-  "version": "0.1.1",
+  "version": "0.2.1",
+  "packageManager": "pnpm@12.15.0",
   "description": "Pi extension: multi-instance token/cost/TTFT usage collector + Tauri dashboard",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhaowendao2005/pi-agent_usage_report.git"
+  },
+  "homepage": "https://github.com/zhaowendao2005/pi-agent_usage_report#readme",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -15,7 +21,8 @@
   "files": [
     "dist/extensions",
     "dist/BUILD_INFO.json",
-    "dist/pi-usage-monitor.exe",
+    "scripts/postinstall.mjs",
+    "scripts/lib/platform.mjs",
     "README.md"
   ],
   "pi": {
@@ -23,15 +30,29 @@
       "./dist/extensions"
     ]
   },
+  "optionalDependencies": {
+    "usage-report-darwin-arm64": "0.1.1",
+    "usage-report-darwin-x64": "0.1.1",
+    "usage-report-win32-x64": "0.1.1",
+    "usage-report-linux-x64": "0.1.1",
+    "usage-report-linux-arm64": "0.1.1"
+  },
   "scripts": {
+    "postinstall": "node scripts/postinstall.mjs",
     "build": "node scripts/build.mjs",
+    "build:fast": "node scripts/build.mjs --skip-tauri",
+    "dev": "tauri dev",
     "build:web": "npm --prefix src-tauri/src-web run build",
-    "dev": "npx tauri dev",
     "dev:web": "npm --prefix src-tauri/src-web run dev",
+    "set-version": "node scripts/set-version.mjs",
     "seed": "node scripts/seed-db.mjs",
     "calibrate": "node scripts/calibrate-existing-db.mjs",
     "release": "node scripts/release.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:universal": "node scripts/build.mjs --universal",
+    "build:intel": "node scripts/build.mjs --intel",
+    "publish:npm": "node scripts/publish.mjs",
+    "build:ext": "node scripts/build.mjs --extension-only"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -49,5 +70,11 @@
     "@types/node": "^22.0.0",
     "typebox": "*",
     "typescript": "^5.5.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@google/genai",
+      "protobufjs"
+    ]
   }
 }

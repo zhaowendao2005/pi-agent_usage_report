@@ -19,3 +19,6 @@ docs/PROJECT_INTRO_OUTLINE.md
 
 .playwright-cli/
 *.png
+
+# generated per-platform npm payloads
+packages/

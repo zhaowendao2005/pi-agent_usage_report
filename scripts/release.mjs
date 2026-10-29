@@ -1,203 +1,203 @@
 #!/usr/bin/env node
 /**
- * Release pipeline for usage-report
+ * Trigger a cloud release.
  *
- * 0) Worktree check: any uncommitted change is allowed ONLY if it is a
- *    version-number drift in package.json / package-lock.json (e.g. from a
- *    previous interrupted release or a manual `npm version`). The drift is
- *    picked up and committed at the end of the release. Any other change
- *    aborts.
- * 1) Bump version: patch | minor | major (default patch)
- * 2) npm run build → fresh dist/
- * 3) npm pack --dry-run → strict allowlist on tarball entries
- * 4) npm publish
- * 5) Commit version bump + annotated tag v<version>
+ * The single source of truth for the version is package.json. This script never
+ * changes it — it only proves that the current commit is publishable, then pushes
+ * an annotated tag, which starts .github/workflows/release.yml:
  *
- * On any failure after the bump, the version edit is rolled back, so the
- * working tree never stays "dirty" because of version changes alone.
+ *   guard (tag == package.json, version unpublished)
+ *     → build (matrix: darwin universal / win32-x64 / linux-x64, artifacts only)
+ *       → publish (manual approval gate → npm: platform packages, then main)
+ *         → GitHub Release (same binaries, used as download fallback)
  *
  * Usage:
- *   node scripts/release.mjs [patch|minor|major]       # full release
- *   node scripts/release.mjs patch --dry-run           # everything except publish/commit/tag
- *   node scripts/release.mjs --check-only              # only validate tarball allowlist
+ *   node scripts/release.mjs                 # preflight + tag + push tag
+ *   node scripts/release.mjs --dry-run       # preflight only
+ *   node scripts/release.mjs --watch         # ... and follow the workflow (needs gh)
+ *   node scripts/release.mjs --no-check      # skip the tarball allowlist check
+ *   node scripts/release.mjs --publish-only v0.2.0
+ *                                            # re-publish an existing tag without rebuilding
+ *
+ * Typical loop:
+ *   1. edit code, bump package.json (e.g. `pnpm set-version 0.2.0`), commit, push
+ *   2. pnpm release
+ *   3. approve the `npm-publish` environment in GitHub Actions
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { platform } from "node:os";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const pkgPath = join(root, "package.json");
-const isWin = platform() === "win32";
-
 const args = process.argv.slice(2);
-const bumpTypes = ["patch", "minor", "major"];
-const bump = bumpTypes.find((t) => args.includes(t)) ?? "patch";
 const dryRun = args.includes("--dry-run");
-const checkOnly = args.includes("--check-only");
-const otpArg = args.find((a) => a.startsWith("--otp="))?.split("=")[1] ?? process.env.NPM_PUBLISH_OTP;
+const watch = args.includes("--watch");
+const skipCheck = args.includes("--no-check");
+const publishOnlyIdx = args.indexOf("--publish-only");
+const publishOnly = publishOnlyIdx >= 0 ? args[publishOnlyIdx + 1] : null;
 
-console.log(`→ usage-report release [bump=${bump}${dryRun ? ", dry-run" : ""}${checkOnly ? ", check-only" : ""}]`);
+const c = {
+  dim: (s) => `\x1b[2m${s}\x1b[0m`,
+  ok: (s) => `\x1b[32m✓\x1b[0m ${s}`,
+  warn: (s) => `\x1b[33m!\x1b[0m ${s}`,
+  fail: (s) => `\x1b[31m✗\x1b[0m ${s}`,
+  step: (s) => `\n\x1b[36m→ ${s}\x1b[0m`,
+};
 
-/* ---------- helpers ---------- */
+function die(msg, hint) {
+  console.error(c.fail(msg));
+  if (hint) console.error(`  ${hint}`);
+  process.exit(1);
+}
 
-function run(cmd, argsList, opts = {}) {
-  const r = spawnSync(cmd, argsList, {
-    cwd: opts.cwd ?? root,
+function sh(cmd, cmdArgs, { silent = false } = {}) {
+  const r = spawnSync(cmd, cmdArgs, {
+    cwd: root,
     encoding: "utf8",
-    shell: isWin,
-    ...(opts.silent ? { stdio: "pipe" } : { stdio: "inherit" }),
+    stdio: silent ? "pipe" : "inherit",
+    shell: process.platform === "win32",
   });
-  if (r.error) throw r.error;
-  if (r.status !== 0) {
-    const msg = `command failed (${r.status ?? "?"}): ${cmd} ${argsList.join(" ")}`;
-    if (opts.silent && r.stderr) throw new Error(msg + "\n" + r.stderr.trim().slice(0, 2000));
-    throw new Error(msg);
-  }
+  if (r.error) die(`${cmd}: ${r.error.message}`);
   return r;
 }
 
-const versionOf = () => JSON.parse(readFileSync(pkgPath, "utf8")).version;
-let prevVersion = versionOf(); // version present before this run
-let bumped = false;
-let committed = false;
-
-function rollbackVersion() {
-  if (bumped && !committed) {
-    try {
-      run("git", ["checkout", "--", "package.json", "package-lock.json"], { silent: true });
-      console.log(`  ↺ reverted version bump to ${prevVersion}`);
-    } catch {
-      console.error("  ⚠ could not auto-revert version; run: git checkout -- package.json package-lock.json");
-    }
-    bumped = false;
-  }
+function out(cmd, cmdArgs) {
+  const r = sh(cmd, cmdArgs, { silent: true });
+  if (r.status !== 0) return null;
+  return (r.stdout ?? "").trim();
 }
 
-/* ---------- 0) worktree check (version drift allowed) ---------- */
+const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+const version = pkg.version;
+const tag = `v${version}`;
 
-function gitCheck() {
-  // Parse changed paths without relying on porcelain column widths:
-  // worktree vs index, index vs HEAD, and untracked (ignore-rule aware).
-  const work = run("git", ["diff", "--name-only"], { silent: true }).stdout.split("\n").filter(Boolean);
-  const staged = run("git", ["diff", "--cached", "--name-only"], { silent: true }).stdout.split("\n").filter(Boolean);
-  const untracked = run("git", ["ls-files", "--others", "--exclude-standard"], { silent: true }).stdout.split("\n").filter(Boolean);
-  const all = [...new Set([...staged, ...work, ...untracked])].filter(Boolean);
-  if (all.length === 0) return;
+function repoSlug() {
+  const url = out("git", ["remote", "get-url", "origin"]) ?? "";
+  const m = url.match(/github\.com[:/]+([^/]+\/[^/.]+)(?:\.git)?$/);
+  return m ? m[1] : null;
+}
+const slug = repoSlug();
+const actionsUrl = slug ? `https://github.com/${slug}/actions/workflows/release.yml` : "(no github remote)";
 
-  const onlyVersionFiles = all.every((p) => p === "package.json" || p === "package-lock.json");
-  if (!onlyVersionFiles) {
-    console.error("✗ working tree has non-version changes. Commit or stash them first:");
-    all.forEach((p) => console.error("   " + (staged.includes(p) ? "(staged) " : "") + (untracked.includes(p) ? "(untracked) " : "") + p));
-    process.exit(1);
+/* ---------------------------------------------------------------- retry path */
+if (publishOnly) {
+  const t = publishOnly.startsWith("v") ? publishOnly : `v${publishOnly}`;
+  if (dryRun) {
+    console.log(c.dim(`gh workflow run publish-retry.yml -f tag=${t}`));
+    process.exit(0);
   }
-
-  // Allow the drift only if the diff contains *just* version-number lines.
-  const d =
-    run("git", ["diff", "--", "package.json", "package-lock.json"], { silent: true }).stdout +
-    "\n" +
-    run("git", ["diff", "--cached", "--", "package.json", "package-lock.json"], { silent: true }).stdout;
-  const changedLines = d.split("\n").filter((l) => /^[+-]/.test(l) && !/^[+-]{3}/.test(l));
-  const versionOnly = changedLines.every((l) => /^[+-]\s*"version":\s*"/.test(l));
-  if (!versionOnly) {
-    console.error("✗ package.json / package-lock.json contain non-version changes. Revert or commit them:");
-    changedLines.slice(0, 20).forEach((l) => console.error("   " + l));
-    process.exit(1);
-  }
-  prevVersion = versionOf(); // pick up the drifted version as the baseline (do not re-bump from HEAD)
-  console.log(`→ version drift detected (${versionOf()}), continuing; release will carry it forward`);
+  if (!out("gh", ["--version"])) die("gh CLI not found", "brew install gh");
+  console.log(c.step(`re-publishing ${t} from its existing build artifacts (no rebuild)`));
+  sh("gh", ["workflow", "run", "publish-retry.yml", "-f", `tag=${t}`]);
+  console.log(c.ok(`dispatched — ${slug ? `https://github.com/${slug}/actions/workflows/publish-retry.yml` : ""}`));
+  process.exit(0);
 }
 
-/* ---------- 1) version bump ---------- */
+/* ---------------------------------------------------------------- preflight */
+console.log(c.step(`release ${tag}  (version from package.json)`));
+console.log(c.dim(`   ${dryRun ? "dry-run: nothing will be pushed" : "will tag + push, then CI builds and (after approval) publishes"}`));
 
-function bumpVersion() {
-  if (dryRun || checkOnly) return;
-  console.log(`\n→ npm version ${bump} (${versionOf()} → next)`);
-  run(isWin ? "npm.cmd" : "npm", ["version", bump, "--no-git-tag-version"]);
-  bumped = true;
+console.log(c.step("preflight"));
+
+const insideGit = out("git", ["rev-parse", "--is-inside-work-tree"]) === "true";
+if (!insideGit) die("not a git repository");
+
+const branch = out("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
+const dirty = (out("git", ["status", "--porcelain"]) ?? "").split("\n").filter(Boolean);
+if (dirty.length > 0) {
+  die(
+    `working tree is not clean (${dirty.length} path(s))`,
+    "commit or stash first — CI builds exactly what is pushed:\n     " + dirty.slice(0, 8).join("\n     ")
+  );
+}
+console.log(c.ok(`clean tree on ${branch}`));
+
+const ahead = out("git", ["rev-list", "--count", `origin/${branch}..HEAD`]);
+if (ahead === null) {
+  die(`no upstream origin/${branch}`, "git push -u origin " + branch);
+}
+if (Number(ahead) > 0) {
+  die(`${ahead} commit(s) not pushed yet`, `git push origin ${branch}  — CI must build the pushed commit, not a local one`);
+}
+console.log(c.ok(`HEAD == origin/${branch}`));
+
+sh("git", ["fetch", "--tags", "--quiet", "origin"], { silent: true });
+const localTag = out("git", ["tag", "-l", tag]);
+const remoteTag = out("git", ["ls-remote", "--tags", "origin", tag]);
+if (localTag || remoteTag) {
+  die(
+    `tag ${tag} already exists`,
+    `npm versions are immutable — bump package.json first:\n     pnpm set-version ${bumpPatch(version)}`
+  );
+}
+console.log(c.ok(`tag ${tag} is free`));
+
+const npmView = sh("npm", ["view", `usage-report@${version}`, "version"], { silent: true });
+if (npmView.status === 0) {
+  die(`usage-report@${version} is already on npm`, `bump package.json: pnpm set-version ${bumpPatch(version)}`);
+}
+if (npmView.error || npmView.status === null) {
+  console.log(c.warn("could not reach the npm registry — skipping the published-version check"));
+} else {
+  console.log(c.ok(`usage-report@${version} is unpublished`));
 }
 
-/* ---------- 2) build ---------- */
-
-function build() {
-  if (dryRun || checkOnly) {
-    console.log("\n→ (skip build) npm run build");
-    return;
-  }
-  console.log("\n→ npm run build");
-  run(isWin ? "npm.cmd" : "npm", ["run", "build"]);
-}
-
-/* ---------- 3) tarball allowlist ---------- */
-
-const ALLOW = [
-  "package.json",
-  "README.md",
-  "dist/BUILD_INFO.json",
-  /^dist\/pi-usage-monitor(\.exe)?$/, // platform binary name
-  /^dist\/extensions\/[^/]+\.js$/, // compiled extension, no nested dirs
-];
-
-function checkTarball() {
-  console.log("\n→ npm pack --dry-run --json (allowlist check)");
-  const r = run(isWin ? "npm.cmd" : "npm", ["pack", "--dry-run", "--json"], { silent: true });
+if (!skipCheck) {
+  console.log(c.step("tarball allowlist (npm pack --dry-run)"));
+  const r = sh("npm", ["pack", "--dry-run", "--json"], { silent: true });
+  if (r.status !== 0) die("npm pack --dry-run failed");
   let data;
   try {
     data = JSON.parse(r.stdout);
   } catch {
-    throw new Error("cannot parse npm pack output:\n" + (r.stdout ?? "").slice(0, 2000));
+    die("cannot parse npm pack output");
   }
   const files = (data[0]?.files ?? []).map((f) => f.path);
+  const ALLOW = [
+    "package.json",
+    "README.md",
+    "dist/BUILD_INFO.json",
+    /^dist\/extensions\/[^/]+\.js$/,
+    "scripts/postinstall.mjs",
+    "scripts/lib/platform.mjs",
+  ];
   const bad = files.filter((p) => !ALLOW.some((a) => (typeof a === "string" ? a === p : a.test(p))));
-  if (bad.length > 0) {
-    throw new Error(
-      "tarball contains unexpected files:\n  " +
-        bad.join("\n  ") +
-        "\nRemove them from dist/ or tighten npm `files`."
-    );
+  if (bad.length > 0) die("tarball contains unexpected files:\n   " + bad.join("\n   "), "tighten package.json `files`");
+  const bytes = data[0]?.unpackedSize ?? 0;
+  console.log(c.ok(`tarball OK: ${files.length} files, ${(bytes / 1024).toFixed(1)} KB`));
+}
+
+function bumpPatch(v) {
+  const [maj, min, pat] = v.split("-")[0].split(".").map(Number);
+  return `${maj}.${min}.${pat + 1}`;
+}
+
+/* ---------------------------------------------------------------- go */
+if (dryRun) {
+  console.log(c.step("dry-run — would now:"));
+  console.log(`   git tag -a ${tag} -m "usage-report ${tag}"`);
+  console.log(`   git push origin ${tag}`);
+  console.log(c.dim(`   → ${actionsUrl}`));
+  process.exit(0);
+}
+
+console.log(c.step(`tagging + pushing ${tag}`));
+sh("git", ["tag", "-a", tag, "-m", `usage-report ${tag}`]);
+sh("git", ["push", "origin", tag]);
+
+console.log(c.ok(`pushed ${tag} — CI is building now`));
+console.log(`   ${c.dim(actionsUrl)}`);
+console.log(
+  `\n${c.warn("the npm publish job waits for approval")}: review the run, then approve the "npm-publish" environment.`
+);
+
+if (watch) {
+  if (!out("gh", ["--version"])) {
+    console.log(c.warn("gh CLI not installed — open the URL above to follow the run"));
+  } else {
+    const r = spawnSync("gh", ["run", "watch", "--workflow", "release.yml"], { cwd: root, stdio: "inherit" });
+    process.exit(r.status ?? 0);
   }
-  const bytes = data[0].unpackedSize ?? files.reduce((a, f) => a + (f.size ?? 0), 0);
-  console.log(`✓ tarball OK: ${files.length} files, ${(bytes / 1024).toFixed(1)} KB`);
-  files.forEach((p) => console.log("   " + p));
-}
-
-/* ---------- 4) publish ---------- */
-
-function publish() {
-  if (dryRun || checkOnly) return;
-  const p = ["publish"];
-  if (otpArg) p.push("--otp", otpArg);
-  console.log(`\n→ npm publish${otpArg ? " (with --otp)" : ""}`);
-  run(isWin ? "npm.cmd" : "npm", p);
-}
-
-/* ---------- 5) commit + tag ---------- */
-
-function tagAndCommit() {
-  if (dryRun || checkOnly) return;
-  const v = versionOf();
-  console.log(`\n→ git commit + tag v${v}`);
-  run("git", ["add", "package.json", "package-lock.json"]);
-  run("git", ["commit", "-m", `chore: version bump to v${v} (release)`]);
-  committed = true;
-  run("git", ["tag", "-a", `v${v}`, "-m", `usage-report v${v}`]);
-  console.log(`✓ tagged v${v} — don't forget: git push && git push --tags`);
-}
-
-/* ---------- main ---------- */
-
-try {
-  if (!checkOnly) gitCheck();
-  bumpVersion();
-  build();
-  checkTarball();
-  publish();
-  tagAndCommit();
-  console.log("\n✅ done." + (dryRun ? " (dry-run: publish/commit/tag skipped)" : " — remember to push tags."));
-} catch (e) {
-  rollbackVersion();
-  console.error("\n✗ release aborted: " + e.message);
-  process.exit(1);
 }

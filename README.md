@@ -2,21 +2,45 @@
 
 Pi 扩展：在多个终端同时跑 pi 时，采集每次 LLM 调用的 **token / 缓存 / 费用 / TTFT / TPS**，写入 `~/.pi/pi-usage-report-store/usage.db`，并用 **Tauri 2** 桌面窗口做实时统计仪表盘。
 
-## 产物体积
+## 产物与平台分发
 
-`dist/pi-usage-monitor.exe` 约 **4.4MB**（使用系统 WebView2，不内嵌 Bun / Chromium）。`dist/` 是自包含产物：**编译后的扩展 JS + 桌面 exe**，直接可作为 pi 包安装/临时装载。
+主包很小（**~17 KB**），不含二进制；桌面二进制按平台拆成独立的 npm 包，由 npm/pnpm/yarn 依据 `os`/`cpu` 字段**自动只装当前平台那一个**。
+
+```
+usage-report                 ← 用户安装的（编译后的扩展 JS + 解析器）
+└─ optionalDependencies (os/cpu 自动筛选)
+   usage-report-darwin-arm64   usage-report-darwin-x64
+   usage-report-win32-x64      usage-report-linux-x64   usage-report-linux-arm64
+```
+
+`dist/bin/<target>/pi-usage-monitor` 与 `packages/usage-report-<target>/` 只存在于源码检出里（本地 `file:` 安装 / 调试用），**不进 npm 包**。
+
+运行时解析顺序（`extensions/spawn.ts`，每个候选都做二进制头校验）：
+
+```
+$PI_USAGE_MONITOR_BIN → dist/bin/<target> → usage-report-<target>/bin
+→ src-tauri/target/{release,debug} → dist/<bin> → ~/.pi/…/bin/<target>
+→ 从 GitHub Release 下载（校验 sha256）→ 仍失败则列出全部尝试路径报错
+```
+
+不可用的原因会写清楚，例如：`mach-o arch x64, need arm64`、`sha256 mismatch`、`HTTP 404`。
+
+环境变量：`PI_USAGE_SKIP_DOWNLOAD=1`（离线/内网）、`PI_USAGE_DOWNLOAD_BASE=<url>`（自建镜像）、`PI_USAGE_MONITOR_BIN=<path>`（强制指定）。
 
 ## 目录结构
 
 ```
 extensions/           # pi 采集端源码（TS，编译进 dist/extensions）
+scripts/              # build / release / set-version / postinstall
 src-tauri/
   src-web/            # Vue3 + Pinia 前端源码
   web/                # 前端构建产物（vite 输出到此，已 gitignore）
   src/                # Rust（rusqlite 只读查询 + usage_config.yaml）
-dist/                 # 发布产物（自包含）
+  tauri.macos.conf.json  # macOS 覆盖：targets=["app"]、signingIdentity
+packages/             # 构建期生成的平台载荷包（gitignore）
+dist/                 # 发布产物
   extensions/         # 编译后的扩展 JS
-  pi-usage-monitor.exe
+  bin/<target>/       # 分平台二进制 + .sha256
   BUILD_INFO.json
 docs/                 # 中文文档
 ```
@@ -26,8 +50,9 @@ docs/                 # 中文文档
 ## 安装与使用
 
 ```bash
-# 先构建（编译扩展 + tauri exe）
-npm run build
+# 先构建（编译扩展 + tauri 原生二进制）
+pnpm build              # 当前平台
+pnpm build:universal    # macOS：同时供 darwin-arm64 / darwin-x64
 
 # 临时装载测试（仅本次运行生效，不写入 settings）
 pi -e ./dist
@@ -37,9 +62,6 @@ pi install ./path/to/usage_report
 
 # 在 pi 内打开仪表盘
 /usage
-
-# 或直接双击
-dist/pi-usage-monitor.exe
 ```
 
 辅助命令：
@@ -50,15 +72,76 @@ dist/pi-usage-monitor.exe
 
 ## 开发
 
-环境要求：Rust stable、Node 22+、Windows WebView2 Runtime（Win11 一般自带）。
+环境要求：Rust stable、Node 22+、macOS 12+ / Windows 10+（WebView2）/ Linux（WebKitGTK）。
 
 ```bash
-npm install && npm --prefix src-tauri/src-web install
+pnpm install && npm --prefix src-tauri/src-web install
 
-npm run seed    # 写入测试数据到 ~/.pi/pi-usage-report-store/usage.db
-npm run dev     # Tauri 开发模式（前端热更新）
-npm run build   # 发布构建 → dist/extensions（编译）+ dist/pi-usage-monitor.exe
+pnpm seed    # 写入测试数据到 ~/.pi/pi-usage-report-store/usage.db
+pnpm dev     # Tauri 开发模式（前端热更新，端口 5893）
+pnpm build   # 发布构建 → dist/extensions + dist/bin/<target>
 ```
+
+### macOS 打包说明
+
+- 只产出 `.app`（不产 dmg）：插件是 `spawn` 直接启动二进制，不需要安装步骤。
+- 默认 **ad-hoc 签名**，`codesign -d -r-` 会看到 `designated => cdhash ...`，即每次重编都是一张“新身份”。本应用不申请任何 TCC 权限，因此无影响；若将来需要（摄像头/屏幕/自动化等），用稳定证书构建：
+  ```bash
+  APPLE_SIGNING_IDENTITY="<证书 CN>" pnpm build
+  ```
+  这样 DR 变成 `identifier + certificate leaf`，重编不再丢失授权。
+- 数据全部在 `~/.pi/pi-usage-report-store/`（**不在 app 内、不在 node_modules**），升级/卸载/换安装方式都不会丢。
+
+## 发布流程（本地 push → 云端构建 → 人工闸门 → npm）
+
+**版本号只由 `package.json` 决定**，CI 永不改版本；CI 只校验 `tag vX.Y.Z == package.json.version`。
+
+```bash
+# 0) 一次性配置（GitHub 网页）
+#    Settings → Environments → 新建 npm-publish，加 Required reviewers
+#    Settings → Secrets → NPM_TOKEN（Automation 类型，或改用 npm trusted publishing）
+
+# 1) 改代码、提交、推送（手动）
+git add -A && git commit -m "feat: ..." && git push
+#    → 触发 .github/workflows/ci.yml（typecheck + 前端构建 + cargo check）
+
+# 2) 定版本（仅改版本号，三处同步：主包 / optionalDependencies / 平台包）
+pnpm set-version 0.1.2
+git add -A && git commit -m "chore(release): v0.1.2" && git push
+
+# 3) 一条命令发布
+pnpm release            # 预检 → 打 tag → push tag（CI 开始构建）
+pnpm release --dry-run  # 只跑预检
+pnpm release --watch    # 顺便跟踪 Actions（需 gh）
+```
+
+预检会拦住：工作区脏、有未推送的 commit、tag 已存在、该版本已在 npm 上（npm 版本不可覆盖）、tarball 里出现意外的文件。
+
+云端流水线（`.github/workflows/release.yml`，tag 触发）：
+
+```
+guard   tag == package.json && 该版本未发布
+  └─ build   matrix: macos-14(universal) / windows-latest / ubuntu-22.04
+  │          只上传 artifacts（全世界唯一的二进制产地）
+  └─ publish 默认卡在 npm-publish environment 等人工批准
+  │          下载 build 的 artifacts → 扩展 JS 从本 tag 重编
+  │          → npm publish 5 个平台包 → 再发主包（顺序不可反）
+  └─         → gh release create（同样的二进制，给下载兜底用）
+```
+
+只重发、不重编（npm 半途失败时）：
+
+```bash
+pnpm release --publish-only v0.1.2      # = gh workflow run publish-retry.yml -f tag=v0.1.2
+```
+
+`scripts/publish.mjs` 是幂等的：已发布的包自动跳过，所以可以放心重跑。
+
+### 首次发布前必做
+
+- 把 `pnpm-lock.yaml`、`pnpm-workspace.yaml` 提交（CI 用 `--frozen-lockfile`）；
+- 建好 `npm-publish` environment + `NPM_TOKEN`；
+- `package.json` 的 version 必须是 npm 上尚未发布的版本。
 
 ## 架构
 

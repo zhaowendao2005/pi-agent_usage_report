@@ -1,0 +1,91 @@
+name: publish-retry
+
+# Re-publish an already-built tag WITHOUT rebuilding.
+#
+# Use when the release workflow failed *after* the build jobs (npm outage, bad
+# token, half-published platform packages). Binaries are pulled from the tag's
+# existing release run, so the published bits stay identical to what was built.
+#
+#   gh workflow run publish-retry.yml -f tag=v0.2.0
+#
+# scripts/publish.mjs is idempotent: already-published packages are skipped.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag, e.g. v0.2.0'
+        required: true
+      dry_run:
+        description: 'npm publish --dry-run'
+        type: boolean
+        default: false
+
+concurrency:
+  group: publish-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TAG: ${{ github.event.inputs.tag }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    environment:
+      name: npm-publish
+      url: https://www.npmjs.com/package/usage-report
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: install
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: locate the release run for this tag
+        id: run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse "${TAG}^{commit}")
+          RUN_ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?head_sha=${SHA}" \
+                     --jq '.workflow_runs[0].id // empty')
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::no release.yml run found for ${TAG} (${SHA}) — run the release workflow first"
+            exit 1
+          fi
+          echo "run-id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "reusing artifacts from run $RUN_ID"
+
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ steps.run.outputs.run-id }}
+          pattern: payload-*
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # binaries come from artifacts, the JS payload is rebuilt from the tag
+      - name: build extension payload
+        run: node scripts/build.mjs --extension-only
+
+      - name: publish
+        run: |
+          ARGS=()
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS+=(--dry-run); fi
+          node scripts/publish.mjs "${ARGS[@]}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
