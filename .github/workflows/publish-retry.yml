@@ -16,6 +16,9 @@ on:
       tag:
         description: 'Existing tag, e.g. v0.2.0'
         required: true
+      run_id:
+        description: 'Optional: release.yml run id to reuse artifacts from (default: newest run for the tag commit)'
+        required: false
       dry_run:
         description: 'npm publish --dry-run'
         type: boolean
@@ -52,17 +55,26 @@ jobs:
       - name: install
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: locate the release run for this tag
+      - name: locate the release run that built this tag
         id: run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          SHA=$(git rev-parse "${TAG}^{commit}")
-          RUN_ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?head_sha=${SHA}" \
-                     --jq '.workflow_runs[0].id // empty')
+          RUN_ID="${{ inputs.run_id }}"
           if [ -z "$RUN_ID" ]; then
-            echo "::error::no release.yml run found for ${TAG} (${SHA}) — run the release workflow first"
+            SHA=$(git rev-parse "${TAG}^{commit}")
+            # a tag push run has head_sha == the tagged commit; a workflow_dispatch run
+            # has head_sha == the dispatched branch, so fall back to the newest run
+            RUN_ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?per_page=20" \
+              --jq "[.workflow_runs[] | select((.head_sha==\"${SHA}\") or (.display_title | test(\"$TAG\")))] | .[0].id // empty")
+            if [ -z "$RUN_ID" ]; then
+              RUN_ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?per_page=20" \
+                --jq '.workflow_runs[0].id // empty')
+            fi
+          fi
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::no release.yml run found for ${TAG} — pass run_id explicitly"
             exit 1
           fi
           echo "run-id=$RUN_ID" >> "$GITHUB_OUTPUT"
