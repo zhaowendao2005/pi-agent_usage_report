@@ -8,7 +8,7 @@
  *
  *   guard (tag == package.json, version unpublished)
  *     → build (matrix: darwin universal / win32-x64 / linux-x64, artifacts only)
- *       → publish (manual approval gate → npm: platform packages, then main)
+ *       → publish (npm: platform packages first, then the main package)
  *         → GitHub Release (same binaries, used as download fallback)
  *
  * Usage:
@@ -98,7 +98,7 @@ if (publishOnly) {
 
 /* ---------------------------------------------------------------- preflight */
 console.log(c.step(`release ${tag}  (version from package.json)`));
-console.log(c.dim(`   ${dryRun ? "dry-run: nothing will be pushed" : "will tag + push, then CI builds and (after approval) publishes"}`));
+console.log(c.dim(`   ${dryRun ? "dry-run: nothing will be pushed" : "will tag + push, then CI builds and publishes"}`));
 
 console.log(c.step("preflight"));
 
