@@ -16,13 +16,13 @@
  *   node scripts/release.mjs --dry-run       # preflight only
  *   node scripts/release.mjs --watch         # ... and follow the workflow (needs gh)
  *   node scripts/release.mjs --no-check      # skip the tarball allowlist check
+ *   node scripts/release.mjs --no-ci         # skip the "CI green on HEAD" check
  *   node scripts/release.mjs --publish-only v0.2.0
  *                                            # re-publish an existing tag without rebuilding
  *
  * Typical loop:
  *   1. edit code, bump package.json (e.g. `pnpm set-version 0.2.0`), commit, push
- *   2. pnpm release
- *   3. approve the `npm-publish` environment in GitHub Actions
+ *   2. pnpm release   (no approval step: build + publish run automatically)
  */
 
 import { spawnSync } from "node:child_process";
@@ -35,6 +35,7 @@ const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
 const watch = args.includes("--watch");
 const skipCheck = args.includes("--no-check");
+const skipCi = args.includes("--no-ci");
 const publishOnlyIdx = args.indexOf("--publish-only");
 const publishOnly = publishOnlyIdx >= 0 ? args[publishOnlyIdx + 1] : null;
 
@@ -144,6 +145,47 @@ if (npmView.error || npmView.status === null) {
   console.log(c.ok(`usage-report@${version} is unpublished`));
 }
 
+/* CI on this commit must be green — this is what replaces a manual approve step.
+ * Skipped silently when gh is unavailable or the commit predates the workflow. */
+if (!skipCi && slug && out("gh", ["--version"])) {
+  console.log(c.step("CI status for HEAD"));
+  const sha = out("git", ["rev-parse", "HEAD"]);
+  const raw = out("gh", [
+    "api",
+    `repos/${slug}/commits/${sha}/check-runs`,
+    "--jq",
+    '[.check_runs[] | {n: .name, s: .status, c: .conclusion}] | @json',
+  ]);
+  if (!raw) {
+    console.log(c.warn("could not read check-runs — skipping"));
+  } else {
+    let runs = [];
+    try {
+      runs = JSON.parse(raw);
+    } catch {
+      runs = [];
+    }
+    const done = runs.filter((r) => r.s === "completed");
+    const bad = done.filter((r) => !["success", "neutral", "skipped"].includes(r.c));
+    const pending = runs.filter((r) => r.s !== "completed");
+    if (bad.length > 0) {
+      die(
+        `CI is red on ${sha.slice(0, 7)}: ${bad.map((r) => `${r.n}=${r.c}`).join(", ")}`,
+        "fix it and push first (or --no-ci to override)"
+      );
+    }
+    if (pending.length > 0) {
+      console.log(
+        c.warn(`CI still running (${pending.length} check(s)) — the tag builds from this commit regardless`)
+      );
+    } else if (done.length === 0) {
+      console.log(c.warn("no check-runs for this commit yet — skipping"));
+    } else {
+      console.log(c.ok(`CI green (${done.length} check(s))`));
+    }
+  }
+}
+
 if (!skipCheck) {
   console.log(c.step("tarball allowlist (npm pack --dry-run)"));
   const r = sh("npm", ["pack", "--dry-run", "--json"], { silent: true });
@@ -187,11 +229,12 @@ console.log(c.step(`tagging + pushing ${tag}`));
 sh("git", ["tag", "-a", tag, "-m", `usage-report ${tag}`]);
 sh("git", ["push", "origin", tag]);
 
-console.log(c.ok(`pushed ${tag} — CI is building now`));
+console.log(c.ok(`pushed ${tag} — CI is building and will publish automatically`));
 console.log(`   ${c.dim(actionsUrl)}`);
 console.log(
-  `\n${c.warn("the npm publish job waits for approval")}: review the run, then approve the "npm-publish" environment.`
+  `\n${c.dim("build (3 platforms) → npm publish (5 platform packages, then the main package) → GitHub Release")}`
 );
+console.log(`${c.dim("if something looks wrong:")} npm dist-tag add usage-report@<previous> latest`);
 
 if (watch) {
   if (!out("gh", ["--version"])) {

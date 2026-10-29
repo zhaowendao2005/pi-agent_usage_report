@@ -37,4 +37,16 @@ if (existsSync(pkgsDir)) {
   }
 }
 
+/* Tauri's own version drives CFBundleShortVersionString in the .app and the
+ * Windows file version, so keep it aligned with the npm package version. */
+const tauriConf = join(root, "src-tauri", "tauri.conf.json");
+if (existsSync(tauriConf)) {
+  const conf = JSON.parse(readFileSync(tauriConf, "utf8"));
+  if (conf.version !== version) {
+    conf.version = version;
+    writeFileSync(tauriConf, JSON.stringify(conf, null, 2) + "\n");
+    console.log(`  · src-tauri/tauri.conf.json → ${version}`);
+  }
+}
+
 console.log(`✓ version → ${version} (package.json + ${ALL_TARGETS.length} platform packages)`);

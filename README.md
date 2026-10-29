@@ -98,8 +98,8 @@ pnpm build   # 发布构建 → dist/extensions + dist/bin/<target>
 
 ```bash
 # 0) 一次性配置（GitHub 网页）
-#    Settings → Environments → 新建 npm-publish，加 Required reviewers
-#    Settings → Secrets → NPM_TOKEN（Automation 类型，或改用 npm trusted publishing）
+#    Settings → Secrets and variables → Actions → NPM_TOKEN（Automation 类型）
+#    （不需要 Environment、不需要人工批准：tag 推上去就自动构建并发布）
 
 # 1) 改代码、提交、推送（手动）
 git add -A && git commit -m "feat: ..." && git push
@@ -110,12 +110,12 @@ pnpm set-version 0.1.2
 git add -A && git commit -m "chore(release): v0.1.2" && git push
 
 # 3) 一条命令发布
-pnpm release            # 预检 → 打 tag → push tag（CI 开始构建）
+pnpm release            # 预检 → 打 tag → push tag（CI 构建 + 自动发布，无需点击）
 pnpm release --dry-run  # 只跑预检
 pnpm release --watch    # 顺便跟踪 Actions（需 gh）
 ```
 
-预检会拦住：工作区脏、有未推送的 commit、tag 已存在、该版本已在 npm 上（npm 版本不可覆盖）、tarball 里出现意外的文件。
+预检会拦住：工作区脏、有未推送的 commit、**HEAD 的 CI 不是绿的**、tag 已存在、该版本已在 npm 上（npm 版本不可覆盖）、tarball 里出现意外的文件。
 
 云端流水线（`.github/workflows/release.yml`，tag 触发）：
 
@@ -123,8 +123,7 @@ pnpm release --watch    # 顺便跟踪 Actions（需 gh）
 guard   tag == package.json && 该版本未发布
   └─ build   matrix: macos-14(universal) / windows-latest / ubuntu-22.04
   │          只上传 artifacts（全世界唯一的二进制产地）
-  └─ publish 默认卡在 npm-publish environment 等人工批准
-  │          下载 build 的 artifacts → 扩展 JS 从本 tag 重编
+  └─ publish 下载 build 的 artifacts → 扩展 JS 从本 tag 重编
   │          → npm publish 5 个平台包 → 再发主包（顺序不可反）
   └─         → gh release create（同样的二进制，给下载兜底用）
 ```
@@ -137,10 +136,17 @@ pnpm release --publish-only v0.1.2      # = gh workflow run publish-retry.yml -f
 
 `scripts/publish.mjs` 是幂等的：已发布的包自动跳过，所以可以放心重跑。
 
+### 发错了怎么办（npm 版本不可覆盖）
+
+```bash
+npm dist-tag add usage-report@<上一个好版本> latest   # 立刻让所有人都装回旧版
+pnpm set-version <新版本> && git commit -am "fix: ..." && git push && pnpm release
+```
+
 ### 首次发布前必做
 
 - 把 `pnpm-lock.yaml`、`pnpm-workspace.yaml` 提交（CI 用 `--frozen-lockfile`）；
-- 建好 `npm-publish` environment + `NPM_TOKEN`；
+- 配好 `NPM_TOKEN`；
 - `package.json` 的 version 必须是 npm 上尚未发布的版本。
 
 ## 架构

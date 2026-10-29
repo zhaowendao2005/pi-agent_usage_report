@@ -35,9 +35,6 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-22.04
-    environment:
-      name: npm-publish
-      url: https://www.npmjs.com/package/usage-report
     steps:
       - uses: actions/checkout@v4
         with:

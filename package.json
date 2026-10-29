@@ -31,11 +31,11 @@
     ]
   },
   "optionalDependencies": {
-    "usage-report-darwin-arm64": "0.1.1",
-    "usage-report-darwin-x64": "0.1.1",
-    "usage-report-win32-x64": "0.1.1",
-    "usage-report-linux-x64": "0.1.1",
-    "usage-report-linux-arm64": "0.1.1"
+    "usage-report-darwin-arm64": "0.2.1",
+    "usage-report-darwin-x64": "0.2.1",
+    "usage-report-win32-x64": "0.2.1",
+    "usage-report-linux-x64": "0.2.1",
+    "usage-report-linux-arm64": "0.2.1"
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs",
@@ -70,11 +70,5 @@
     "@types/node": "^22.0.0",
     "typebox": "*",
     "typescript": "^5.5.0"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@google/genai",
-      "protobufjs"
-    ]
   }
 }
