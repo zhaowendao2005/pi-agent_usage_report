@@ -29,8 +29,8 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
-  id-token: write
+  contents: write # create/refresh the GitHub Release
+  id-token: write # npm provenance
 
 env:
   TAG: ${{ github.event.inputs.tag }}
