@@ -4,7 +4,7 @@
  * Resolution order — first candidate that exists AND passes header inspection wins:
  *   1. $PI_USAGE_MONITOR_BIN                          explicit override
  *   2. <pkg>/dist/bin/<target>/<bin>                  monorepo / file: installs
- *   3. usage-report-<target>/bin/<bin>                optional npm dependency (registry installs)
+ *   3. @zhaowendao2005/usage-report-<target>/bin/<bin> optional npm dependency (registry installs)
  *   4. <pkg>/src-tauri/target/{release,debug}/<bin>   local cargo build
  *   5. <pkg>/dist/<bin>                               legacy layout
  *   6. ~/.pi/pi-usage-report-store/bin/<target>/<bin> download cache
@@ -61,7 +61,8 @@ function packageVersion(root: string): string | null {
 /** The optional dependency package, if the registry installed one for this platform. */
 function fromPlatformPackage(): string | null {
   const require = createRequire(import.meta.url);
-  const name = `usage-report-${TARGET}`;
+  // keep in sync with scripts/lib/platform.mjs (platformPackageName)
+  const name = `@zhaowendao2005/usage-report-${TARGET}`;
   try {
     const pkgJson = require.resolve(`${name}/package.json`);
     const p = join(dirname(pkgJson), "bin", BIN);
@@ -183,7 +184,7 @@ function failureMessage(root: string, located: Located | null, extra?: string): 
     ...(located?.rejections.map((r) => `  ${r}`) ?? []),
     "",
     'Fixes: run "pnpm build" in a source checkout, install the optional',
-    `"usage-report-${TARGET}" package, or set PI_USAGE_MONITOR_BIN to a valid binary.`,
+    `"@zhaowendao2005/usage-report-${TARGET}" package, or set PI_USAGE_MONITOR_BIN to a valid binary.`,
   ];
   return lines.filter(Boolean).join("\n");
 }

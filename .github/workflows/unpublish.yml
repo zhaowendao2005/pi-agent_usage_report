@@ -1,0 +1,63 @@
+name: unpublish
+
+# Manual escape hatch for removing a published version (bad name, broken
+# artifact, accidental publish). Runs with NPM_TOKEN so it does not need an
+# interactive 2FA prompt; `npm unpublish` is allowed within 72h of publishing
+# and impossible once anything depends on the version.
+#
+#   gh workflow run unpublish.yml -f packages="usage-report-darwin-arm64@0.2.1 other@1.0.0"
+#
+# Dry-run first: it only prints what would happen.
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Space separated name@version list'
+        required: true
+      dry_run:
+        description: 'Only print, do not unpublish'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  unpublish:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: check npm credentials
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is missing"
+            exit 1
+          fi
+          echo "npm user: $(npm whoami)"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: unpublish
+        run: |
+          set -euo pipefail
+          for spec in ${{ inputs.packages }}; do
+            exists=$(npm view "$spec" version 2>/dev/null || true)
+            if [ -z "$exists" ]; then
+              echo "↷ $spec not found — skip"
+              continue
+            fi
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "• would unpublish $spec (dry-run)"
+              continue
+            fi
+            echo "→ npm unpublish $spec --force"
+            npm unpublish "$spec" --force
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

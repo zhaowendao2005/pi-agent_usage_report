@@ -7,18 +7,26 @@ Pi 扩展：在多个终端同时跑 pi 时，采集每次 LLM 调用的 **token
 主包很小（**~17 KB**），不含二进制；桌面二进制按平台拆成独立的 npm 包，由 npm/pnpm/yarn 依据 `os`/`cpu` 字段**自动只装当前平台那一个**。
 
 ```
-usage-report                 ← 用户安装的（编译后的扩展 JS + 解析器）
+usage-report                                  ← 用户安装的（编译后的扩展 JS + 解析器）
 └─ optionalDependencies (os/cpu 自动筛选)
-   usage-report-darwin-arm64   usage-report-darwin-x64
-   usage-report-win32-x64      usage-report-linux-x64   usage-report-linux-arm64
+   @zhaowendao2005/usage-report-darwin-arm64
+   @zhaowendao2005/usage-report-darwin-x64
+   @zhaowendao2005/usage-report-win32-x64
+   @zhaowendao2005/usage-report-linux-x64
+   @zhaowendao2005/usage-report-linux-arm64
 ```
+
+平台包**必须是有 scope 的**（和 `@esbuild/darwin-arm64`、`@swc/core-darwin-arm64`、
+`@rollup/rollup-darwin-arm64` 同样的做法）：scope 绑定在账号上，npm 的反滥用启发式
+不会把"短时间内连续创建多个同前缀新包"当成抢注。裸名 `usage-report-<target>`
+会被判定 `403 Package name triggered spam detection`。
 
 `dist/bin/<target>/pi-usage-monitor` 与 `packages/usage-report-<target>/` 只存在于源码检出里（本地 `file:` 安装 / 调试用），**不进 npm 包**。
 
 运行时解析顺序（`extensions/spawn.ts`，每个候选都做二进制头校验）：
 
 ```
-$PI_USAGE_MONITOR_BIN → dist/bin/<target> → usage-report-<target>/bin
+$PI_USAGE_MONITOR_BIN → dist/bin/<target> → @scope/usage-report-<target>/bin
 → src-tauri/target/{release,debug} → dist/<bin> → ~/.pi/…/bin/<target>
 → 从 GitHub Release 下载（校验 sha256）→ 仍失败则列出全部尝试路径报错
 ```

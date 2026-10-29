@@ -37,7 +37,15 @@ import {
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { ALL_TARGETS, TARGET, binName, isWin, osCpu, platformPackageName } from "./lib/platform.mjs";
+import {
+  ALL_TARGETS,
+  TARGET,
+  binName,
+  isWin,
+  osCpu,
+  platformDirName,
+  platformPackageName,
+} from "./lib/platform.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -161,8 +169,17 @@ const bundles = findBundles();
 
 /* ---------- 4) platform npm packages ---------- */
 if (!noPlatform) {
+  // drop payloads from earlier runs (e.g. before switching to scoped names)
+  const pkgsRoot = join(root, "packages");
+  if (existsSync(pkgsRoot)) {
+    for (const entry of readdirSync(pkgsRoot)) {
+      if (!stageTargets.map(platformDirName).includes(entry)) {
+        rmSync(join(pkgsRoot, entry), { recursive: true, force: true });
+      }
+    }
+  }
   for (const target of stageTargets) {
-    const dir = join(root, "packages", platformPackageName(target));
+    const dir = join(root, "packages", platformDirName(target));
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(join(dir, "bin"), { recursive: true });
     const dest = join(dir, "bin", binName(target));

@@ -1,6 +1,6 @@
 {
   "name": "usage-report",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "packageManager": "pnpm@12.15.0",
   "description": "Pi extension: multi-instance token/cost/TTFT usage collector + Tauri dashboard",
   "type": "module",
@@ -31,11 +31,11 @@
     ]
   },
   "optionalDependencies": {
-    "usage-report-darwin-arm64": "0.2.1",
-    "usage-report-darwin-x64": "0.2.1",
-    "usage-report-win32-x64": "0.2.1",
-    "usage-report-linux-x64": "0.2.1",
-    "usage-report-linux-arm64": "0.2.1"
+    "@zhaowendao2005/usage-report-darwin-arm64": "0.2.2",
+    "@zhaowendao2005/usage-report-darwin-x64": "0.2.2",
+    "@zhaowendao2005/usage-report-win32-x64": "0.2.2",
+    "@zhaowendao2005/usage-report-linux-x64": "0.2.2",
+    "@zhaowendao2005/usage-report-linux-arm64": "0.2.2"
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs",
