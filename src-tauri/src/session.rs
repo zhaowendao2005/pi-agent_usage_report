@@ -106,7 +106,11 @@ pub struct ActiveRequestTelemetry {
     pub current_delta_snippet: String,
     pub accumulated_text: String,
     pub thinking_text: String,
+    /// tool_call 阶段的原始 JSON 参数字符串累积（按调用顺序拼接）
+    pub tool_call_text: String,
     pub chunks: Vec<TelemetryChunk>,
+    /// 按到达顺序合并的段（thinking / text / tool_call），用于保真渲染先后顺序
+    pub blocks: Vec<TelemetryChunk>,
     pub total_chars: usize,
     pub total_tokens_est: usize,
     pub started_at: Option<i64>,
@@ -130,7 +134,9 @@ impl Default for ActiveRequestTelemetry {
             current_delta_snippet: String::new(),
             accumulated_text: String::new(),
             thinking_text: String::new(),
+            tool_call_text: String::new(),
             chunks: Vec::new(),
+            blocks: Vec::new(),
             total_chars: 0,
             total_tokens_est: 0,
             started_at: None,
@@ -1118,8 +1124,10 @@ fn build_historical_session_telemetry(session_id: &str, file_path: &str) -> Opti
     let reader = BufReader::new(file);
 
     let mut chunks: Vec<TelemetryChunk> = Vec::new();
+    let mut blocks: Vec<TelemetryChunk> = Vec::new();
     let mut accumulated_text = String::new();
     let mut thinking_text = String::new();
+    let mut tool_call_text = String::new();
     let mut total_chars = 0usize;
     let mut total_tokens = 0usize;
     let mut last_model: Option<String> = None;
@@ -1142,8 +1150,10 @@ fn build_historical_session_telemetry(session_id: &str, file_path: &str) -> Opti
                     if role == "user" {
                         // Start of a new user turn: only retain the latest turn's received LLM output
                         chunks.clear();
+                        blocks.clear();
                         accumulated_text.clear();
                         thinking_text.clear();
+                        tool_call_text.clear();
                         total_chars = 0;
                         total_tokens = 0;
                         seq = 0;
@@ -1214,6 +1224,14 @@ fn build_historical_session_telemetry(session_id: &str, file_path: &str) -> Opti
                                                 total_chars,
                                                 text: t.chars().take(600).collect(),
                                             });
+                                            blocks.push(TelemetryChunk {
+                                                seq,
+                                                timestamp: ts_ms,
+                                                phase: "thinking".to_string(),
+                                                chars,
+                                                total_chars,
+                                                text: t.to_string(),
+                                            });
                                         }
                                     }
                                 } else if itype == "text" {
@@ -1236,6 +1254,14 @@ fn build_historical_session_telemetry(session_id: &str, file_path: &str) -> Opti
                                                 total_chars,
                                                 text: t.chars().take(600).collect(),
                                             });
+                                            blocks.push(TelemetryChunk {
+                                                seq,
+                                                timestamp: ts_ms,
+                                                phase: "text".to_string(),
+                                                chars,
+                                                total_chars,
+                                                text: t.to_string(),
+                                            });
                                         }
                                     }
                                 } else if itype == "toolCall" {
@@ -1245,6 +1271,12 @@ fn build_historical_session_telemetry(session_id: &str, file_path: &str) -> Opti
                                         .map(|a| a.to_string())
                                         .unwrap_or_default();
                                     let text = format!("[toolCall: {}] {}", name, args_str);
+                                    if tool_call_text.len() < 120_000 {
+                                        if !tool_call_text.is_empty() {
+                                            tool_call_text.push_str("\n\n");
+                                        }
+                                        tool_call_text.push_str(&text);
+                                    }
                                     let chars = text.chars().count();
                                     total_chars += chars;
                                     seq += 1;
@@ -1255,6 +1287,14 @@ fn build_historical_session_telemetry(session_id: &str, file_path: &str) -> Opti
                                         chars,
                                         total_chars,
                                         text: text.chars().take(600).collect(),
+                                    });
+                                    blocks.push(TelemetryChunk {
+                                        seq,
+                                        timestamp: ts_ms,
+                                        phase: "tool_call".to_string(),
+                                        chars,
+                                        total_chars,
+                                        text,
                                     });
                                 }
                             }
@@ -1281,7 +1321,9 @@ fn build_historical_session_telemetry(session_id: &str, file_path: &str) -> Opti
         current_delta_snippet: last_snippet,
         accumulated_text,
         thinking_text,
+        tool_call_text,
         chunks,
+        blocks,
         total_chars,
         total_tokens_est: est_tokens,
         started_at: None,

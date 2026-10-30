@@ -87,6 +87,10 @@ export interface ActiveRequestTelemetry {
   currentDeltaSnippet: string
   accumulatedText: string
   thinkingText: string
+  /** tool_call 阶段的原始 JSON 参数累积（可能为多个调用，按顺序拼接） */
+  toolCallText?: string
+  /** 按到达顺序合并的段（thinking / text / tool_call），用于保真渲染先后顺序 */
+  blocks?: TelemetryChunk[]
   chunks: TelemetryChunk[]
   totalChars: number
   totalTokensEst: number
@@ -157,6 +161,8 @@ function createEmptyTelemetry(sessionId: string | null = null): ActiveRequestTel
     currentDeltaSnippet: '',
     accumulatedText: '',
     thinkingText: '',
+    toolCallText: '',
+    blocks: [],
     chunks: [],
     totalChars: 0,
     totalTokensEst: 0,
@@ -806,6 +812,8 @@ function createMockTelemetryForSession(session: SessionSummary): ActiveRequestTe
         .filter((c) => c.phase !== 'thinking')
         .map((c) => c.text)
         .join('\n\n'),
+      toolCallText: '',
+      blocks: chunks,
       chunks,
       totalChars: 504,
       totalTokensEst: 144,
@@ -857,6 +865,8 @@ function createMockTelemetryForSession(session: SessionSummary): ActiveRequestTe
     currentDeltaSnippet: '',
     thinkingText: histChunks[0].text,
     accumulatedText: `${histChunks[1].text}\n\n${histChunks[2].text}`,
+    toolCallText: '',
+    blocks: histChunks,
     chunks: histChunks,
     totalChars: 242,
     totalTokensEst: 69,

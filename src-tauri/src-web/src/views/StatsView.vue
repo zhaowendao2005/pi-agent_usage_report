@@ -129,15 +129,17 @@
     </div>
 
     <!-- Token 与费用分布区 -->
-    <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
       <TokenPieChart />
       <CostPieChart />
-      <ModelBreakdownChart />
       <div class="grid grid-rows-2 gap-3">
         <CacheRateChart />
         <CostTrendChart />
       </div>
     </div>
+
+    <!-- 模型用量分布（整行：内置 提供商→模型 筛选树） -->
+    <ModelBreakdownChart />
 
     <!-- 调用量与错误分析 -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-3">

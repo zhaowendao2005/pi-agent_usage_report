@@ -48,6 +48,14 @@
               {{ showThinkingFull ? '收起思维链' : `展开思维链 (${curTel.thinkingText.length}字)` }}
             </button>
             <button
+              v-if="hasToolCalls && streamViewMode === 'stream'"
+              @click="rawToolFragments = !rawToolFragments"
+              class="text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+              title="在「原始 token 碎片」与「还原后的成段文本」之间切换"
+            >
+              {{ rawToolFragments ? '还原成段' : '查看原始碎片' }}
+            </button>
+            <button
               v-if="curTel.totalChars > 0"
               @click="copyAccumulatedText"
               class="text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
@@ -59,7 +67,7 @@
 
         <!-- Empty State -->
         <div
-          v-if="!curTel.isActive && curTel.totalChars === 0 && curTel.chunks.length === 0"
+          v-if="!curTel.isActive && curTel.totalChars === 0 && curTel.chunks.length === 0 && !hasToolCalls"
           class="flex-1 flex flex-col items-center justify-center text-muted-foreground p-12 text-center"
         >
           <RadioIcon class="w-6 h-6 mb-3 opacity-30 text-foreground" />
@@ -69,63 +77,121 @@
           </p>
         </div>
 
-        <!-- Mode 1: Full-Height Clean LLM Output Stream -->
+        <!-- Mode 1: Full-Height Clean LLM Output Stream（严格按分片到达顺序渲染） -->
         <div
           v-else-if="streamViewMode === 'stream'"
           class="flex-1 min-h-0 overflow-y-auto px-6 py-6 space-y-6 select-text"
         >
-          <!-- Collapsible Thinking Block -->
+          <!-- 原始碎片调试视图：保留到达顺序，逐条展示 -->
           <div
-            v-if="curTel.thinkingText"
-            class="border-l-2 border-violet-500/40 pl-4 py-0.5 space-y-2 max-w-4xl"
+            v-if="rawToolFragments"
+            class="max-w-4xl border border-border/60 bg-secondary/10 max-h-[70vh] overflow-y-auto"
           >
-            <div
-              @click="showThinkingFull = !showThinkingFull"
-              class="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground cursor-pointer select-none"
-            >
-              <span class="font-medium text-violet-600 dark:text-violet-400">思维链推理</span>
-              <span class="font-mono text-[11px] opacity-75">· {{ curTel.thinkingText.length.toLocaleString() }} 字</span>
-              <span class="text-[11px] opacity-60">{{ showThinkingFull ? '▾' : '▸' }}</span>
+            <div class="sticky top-0 z-10 flex items-center justify-between px-3 py-1.5 border-b border-border/60 bg-secondary/40 font-mono text-[11px] text-muted-foreground">
+              <span>原始 token 碎片 · 按到达顺序</span>
+              <span>{{ rawFragments.length }} 条</span>
             </div>
-            <p
-              v-if="showThinkingFull"
-              class="text-muted-foreground whitespace-pre-wrap break-words text-xs leading-relaxed font-mono"
+            <div
+              v-for="frag in rawFragments"
+              :key="frag.seq"
+              class="flex items-baseline gap-3 px-3 py-0.5 font-mono text-[11px] hover:bg-accent/30"
             >
-              {{ displayedThinkingText }}
-            </p>
+              <span class="w-12 shrink-0 text-right text-muted-foreground/60">#{{ frag.seq }}</span>
+              <span class="w-14 shrink-0 text-[10px]" :class="getChunkPhaseClass(frag.phase)">{{ formatChunkPhase(frag.phase) }}</span>
+              <span class="whitespace-pre-wrap break-all text-foreground/80">{{ frag.text }}</span>
+            </div>
           </div>
 
-          <!-- Main LLM Output Text -->
-          <div v-if="curTel.accumulatedText" class="max-w-4xl space-y-3">
-            <div class="text-foreground whitespace-pre-wrap break-words text-[13px] leading-7 font-mono">
-              {{ displayedAccumulatedText }}<span
-                v-if="curTel.isActive && curTel.phase === 'text'"
-                class="inline-block w-1.5 h-4 ml-0.5 align-middle bg-emerald-500 animate-pulse"
-              />
-            </div>
-            <button
-              v-if="isAccumulatedTruncated && !expandFullAccumulated"
-              @click="expandFullAccumulated = true"
-              class="px-3 py-1.5 border border-border bg-secondary/30 text-xs text-primary hover:bg-accent cursor-pointer"
-            >
-              展开剩余 {{ (curTel.accumulatedText.length - MAX_PREVIEW_CHARS).toLocaleString() }} 字符...
-            </button>
-          </div>
+          <!-- 成段视图：thinking / text / tool_call 按原始到达顺序交错渲染 -->
+          <template v-else>
+            <template v-for="(block, blockIdx) in streamBlocks" :key="block.key">
+              <!-- 思维链 -->
+              <div
+                v-if="block.kind === 'thinking'"
+                class="border-l-2 border-violet-500/40 pl-4 py-0.5 space-y-2 max-w-4xl"
+              >
+                <div
+                  @click="showThinkingFull = !showThinkingFull"
+                  class="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground cursor-pointer select-none"
+                >
+                  <span class="font-medium text-violet-600 dark:text-violet-400">思维链推理</span>
+                  <span class="font-mono text-[11px] opacity-75">· {{ block.chars.toLocaleString() }} 字</span>
+                  <span class="text-[11px] opacity-60">{{ showThinkingFull ? '▾' : '▸' }}</span>
+                </div>
+                <p
+                  v-if="showThinkingFull"
+                  class="text-muted-foreground whitespace-pre-wrap break-words text-xs leading-relaxed font-mono"
+                >
+                  {{ previewThinking(block.text) }}
+                </p>
+              </div>
 
-          <!-- Fallback when LLM output in this turn is purely toolCall tokens -->
-          <div
-            v-else-if="toolCallChunks.length > 0"
-            class="max-w-4xl space-y-2"
-          >
-            <div class="text-xs text-muted-foreground">模型输出工具调用指令：</div>
-            <div
-              v-for="tc in toolCallChunks"
-              :key="tc.seq"
-              class="border-l-2 border-amber-500/50 pl-3 py-1 font-mono text-xs text-foreground/90 whitespace-pre-wrap break-all"
-            >
-              {{ tc.text }}
-            </div>
-          </div>
+              <!-- 正文段落 -->
+              <div v-else-if="block.kind === 'text'" class="max-w-4xl space-y-3">
+                <div v-if="block.synthetic" class="text-[11px] font-sans text-muted-foreground/70">
+                  累计正文（早期分包已滚出缓冲，位置仅为近似）
+                </div>
+                <div class="space-y-3 text-foreground text-[13px] leading-7">
+                  <p
+                    v-for="(para, idx) in blockParagraphs(block)"
+                    :key="idx"
+                    class="whitespace-pre-wrap break-words font-mono"
+                  >
+                    {{ para }}<span
+                      v-if="idx === blockParagraphs(block).length - 1 && blockIdx === streamBlocks.length - 1 && curTel.isActive && curTel.phase === 'text'"
+                      class="inline-block w-1.5 h-4 ml-0.5 align-middle bg-emerald-500 animate-pulse"
+                    />
+                  </p>
+                </div>
+                <button
+                  v-if="isBlockTruncated(block.text) && !expandFullAccumulated"
+                  @click="expandFullAccumulated = true"
+                  class="px-3 py-1.5 border border-border bg-secondary/30 text-xs text-primary hover:bg-accent cursor-pointer"
+                >
+                  展开剩余 {{ (block.text.length - MAX_PREVIEW_CHARS).toLocaleString() }} 字符...
+                </button>
+              </div>
+
+              <!-- 工具调用参数：逐 token 的 JSON 碎片还原成成段文本 -->
+              <div v-else class="max-w-4xl space-y-3">
+                <div class="flex flex-wrap items-center gap-2 text-xs">
+                  <WrenchIcon class="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  <span class="font-medium text-foreground">工具调用参数</span>
+                  <span class="font-mono text-[11px] text-muted-foreground">
+                    {{ toolCallsOf(block).length }} 次调用 ·
+                    {{ block.fragmentCount }} 个流式片段 ·
+                    {{ block.text.length.toLocaleString() }} 字符
+                    <template v-if="!block.synthetic">· 全量累计</template>
+                  </span>
+                </div>
+                <div class="space-y-3">
+                  <article
+                    v-for="call in toolCallsOf(block)"
+                    :key="call.id"
+                    class="border border-border/70 bg-secondary/15"
+                  >
+                    <header class="flex flex-wrap items-center gap-x-2.5 gap-y-1 px-3 py-1.5 border-b border-border/60 font-mono text-[11px] text-muted-foreground">
+                      <span class="px-1.5 py-0.5 border border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                        {{ call.title }}
+                      </span>
+                      <span v-if="call.fromSeq > 0">#{{ call.fromSeq }}–#{{ call.toSeq }} · {{ call.fragmentCount }} 分包</span>
+                      <span>{{ call.rawChars.toLocaleString() }} 字符</span>
+                      <span v-if="call.fields.length" class="text-muted-foreground/70 truncate max-w-[16rem]" :title="call.fields.map((f) => f.key).join(', ')">
+                        字段: {{ call.fields.map((f) => f.key).join(', ') }}
+                      </span>
+                      <span
+                        class="ml-auto"
+                        :class="call.complete ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-500'"
+                      >
+                        {{ call.complete ? 'JSON 完整' : '拼装中…' }}
+                      </span>
+                    </header>
+                    <pre class="px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words font-mono text-foreground/90">{{ call.display }}</pre>
+                  </article>
+                </div>
+              </div>
+            </template>
+          </template>
         </div>
 
         <!-- Mode 2: Full-Height Virtualized Chunk List -->
@@ -209,7 +275,7 @@
                 关闭 ×
               </button>
             </div>
-            <pre class="whitespace-pre-wrap break-all text-xs text-foreground leading-relaxed">{{ selectedChunk.text }}</pre>
+            <pre class="whitespace-pre-wrap break-all text-xs text-foreground leading-relaxed">{{ selectedChunkDisplay }}</pre>
           </div>
         </div>
       </div>
@@ -327,8 +393,15 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { RadioIcon } from 'lucide-vue-next'
+import { RadioIcon, WrenchIcon } from 'lucide-vue-next'
 import { useMonitorStore, type TelemetryChunk } from '@/stores/monitor'
+import {
+  decodeJsonEscapes,
+  parseToolCallText,
+  resolveStreamBlocks,
+  splitParagraphs,
+  type StreamBlock,
+} from '@/lib/streamText'
 
 const monitorStore = useMonitorStore()
 const curTel = computed(() => monitorStore.currentSessionTelemetry)
@@ -338,30 +411,75 @@ const showThinkingFull = ref(true)
 const expandFullAccumulated = ref(false)
 const copiedFull = ref(false)
 const selectedChunk = ref<TelemetryChunk | null>(null)
+const rawToolFragments = ref(false)
 
 const MAX_PREVIEW_CHARS = 24000
 
-const isAccumulatedTruncated = computed(() => curTel.value.accumulatedText.length > MAX_PREVIEW_CHARS)
-
-const displayedAccumulatedText = computed(() => {
-  const txt = curTel.value.accumulatedText
-  if (!txt) return ''
-  if (expandFullAccumulated.value || txt.length <= MAX_PREVIEW_CHARS) {
-    return txt
-  }
-  return txt.slice(0, MAX_PREVIEW_CHARS) + '\n...[已折叠超长尾部，点击下方按钮展开]...'
-})
-
-const displayedThinkingText = computed(() => {
-  const txt = curTel.value.thinkingText
-  if (!txt) return ''
-  if (txt.length <= MAX_PREVIEW_CHARS) return txt
-  return txt.slice(0, MAX_PREVIEW_CHARS) + '\n...[思维链超长已截断预览]...'
-})
-
-const toolCallChunks = computed(() =>
-  curTel.value.chunks.filter((c) => c.phase === 'tool_call')
+/**
+ * 渲染用有序段落：thinking / text / tool_call 严格按分片到达顺序交错。
+ * 优先使用 collector 的顺序日志（blocks），其次最近分包（chunks），最后用累计文本合成。
+ */
+const streamBlocks = computed(() =>
+  resolveStreamBlocks({
+    blocks: curTel.value.blocks,
+    chunks: curTel.value.chunks,
+    accumulatedText: curTel.value.accumulatedText,
+    thinkingText: curTel.value.thinkingText,
+  }),
 )
+
+/** 原始碎片调试视图：按到达顺序的最近分包 */
+const rawFragments = computed(() => curTel.value.chunks)
+
+const hasToolCalls = computed(() => {
+  const text = curTel.value.toolCallText
+  return (!!text && text.trim().length > 0) || streamBlocks.value.some((b) => b.kind === 'tool_call')
+})
+
+function toolCallsOf(block: StreamBlock) {
+  return parseToolCallText(block.text)
+}
+
+function previewText(text: string): string {
+  if (!text) return ''
+  if (expandFullAccumulated.value || text.length <= MAX_PREVIEW_CHARS) return text
+  return text.slice(0, MAX_PREVIEW_CHARS) + '\n...[已折叠超长尾部，点击下方按钮展开]...'
+}
+
+function previewThinking(text: string): string {
+  if (!text) return ''
+  if (text.length <= MAX_PREVIEW_CHARS) return text
+  return text.slice(0, MAX_PREVIEW_CHARS) + '\n...[思维链超长已截断预览]...'
+}
+
+function isBlockTruncated(text: string): boolean {
+  return !!text && text.length > MAX_PREVIEW_CHARS
+}
+
+function blockParagraphs(block: StreamBlock): string[] {
+  return splitParagraphs(previewText(block.text))
+}
+
+/** 复制全文：同样保持到达顺序 */
+const fullStreamText = computed(() =>
+  streamBlocks.value
+    .map((block) => {
+      if (block.kind === 'thinking') return `[Thinking]\n${block.text}`
+      if (block.kind === 'text') return block.text
+      return toolCallsOf(block)
+        .map((call) => `[${call.title}]\n${call.display}`)
+        .join('\n\n')
+    })
+    .filter(Boolean)
+    .join('\n\n'),
+)
+
+const selectedChunkDisplay = computed(() => {
+  const chunk = selectedChunk.value
+  if (!chunk) return ''
+  if (chunk.phase !== 'tool_call') return chunk.text
+  return decodeJsonEscapes(chunk.text)
+})
 
 // Virtual Scroll for Chunk List
 const CHUNK_ROW_HEIGHT = 32
@@ -403,6 +521,7 @@ watch(
   () => {
     selectedChunk.value = null
     expandFullAccumulated.value = false
+    rawToolFragments.value = false
     chunkScrollTop.value = 0
   }
 )
@@ -426,12 +545,7 @@ const visibleChunks = computed(() => reversedChunks.value.slice(chunkStartIndex.
 
 async function copyAccumulatedText() {
   try {
-    const full = [
-      curTel.value.thinkingText ? `[Thinking]\n${curTel.value.thinkingText}` : '',
-      curTel.value.accumulatedText,
-    ]
-      .filter(Boolean)
-      .join('\n\n')
+    const full = fullStreamText.value
     await navigator.clipboard.writeText(full)
     copiedFull.value = true
     setTimeout(() => {

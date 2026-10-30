@@ -23,6 +23,8 @@ export interface LiveTelemetryChunk {
 }
 
 const MAX_LIVE_CHUNKS = 200;
+/** 顺序保真的合并段（thinking/text/tool_call 各一段，按到达顺序） */
+const MAX_LIVE_BLOCKS = 400;
 const MAX_ACCUMULATED_TEXT = 120_000;
 const ACTIVE_TURN_SYNC_THROTTLE_MS = 500;
 
@@ -175,7 +177,16 @@ export class UsageCollector {
   private liveOutputTokens = 0;
   private liveAccumulatedText = "";
   private liveThinkingText = "";
+  /** tool_call 阶段的原始 JSON 参数累积（分包会被裁剪，这里保留全量以便还原） */
+  private liveToolCallText = "";
   private liveChunks: LiveTelemetryChunk[] = [];
+  /**
+   * 按到达顺序合并的段（thinking / text / tool_call 的连续 delta 合并为一段）。
+   * 分包列表只有最近 200 条，不能用于还原「文本 → 工具 → 文本」的先后顺序，
+   * 因此单独维护这份顺序日志。
+   */
+  private liveBlocks: LiveTelemetryChunk[] = [];
+  private liveBlockChars = 0;
   private chunkSeq = 0;
   private lastActiveSyncAt = 0;
   private lastPhase = "idle";
@@ -226,6 +237,8 @@ export class UsageCollector {
         currentDeltaSnippet: state.currentDeltaSnippet ?? "",
         accumulatedText: this.liveAccumulatedText,
         thinkingText: this.liveThinkingText,
+        toolCallText: this.liveToolCallText,
+        blocks: this.liveBlocks,
         chunks: this.liveChunks,
         totalChars,
         totalTokensEst,
@@ -445,6 +458,10 @@ export class UsageCollector {
             if (this.liveAccumulatedText.length < MAX_ACCUMULATED_TEXT) {
               this.liveAccumulatedText += delta;
             }
+          } else if (phase === "tool_call") {
+            if (this.liveToolCallText.length < MAX_ACCUMULATED_TEXT) {
+              this.liveToolCallText += delta;
+            }
           }
           this.chunkSeq += 1;
           this.liveChunks.push({
@@ -457,6 +474,27 @@ export class UsageCollector {
           });
           if (this.liveChunks.length > MAX_LIVE_CHUNKS) {
             this.liveChunks.splice(0, this.liveChunks.length - MAX_LIVE_CHUNKS);
+          }
+
+          // 顺序日志：同阶段连续 delta 合并，阶段变化即新开一段
+          if (this.liveBlockChars < MAX_ACCUMULATED_TEXT && this.liveBlocks.length <= MAX_LIVE_BLOCKS) {
+            const lastBlock = this.liveBlocks[this.liveBlocks.length - 1];
+            if (lastBlock && lastBlock.phase === phase) {
+              lastBlock.text += delta;
+              lastBlock.chars += delta.length;
+              lastBlock.totalChars = this.liveAccumulatedChars;
+              this.liveBlockChars += delta.length;
+            } else if (this.liveBlocks.length < MAX_LIVE_BLOCKS) {
+              this.liveBlocks.push({
+                seq: this.liveBlocks.length + 1,
+                timestamp: now,
+                phase,
+                chars: delta.length,
+                totalChars: this.liveAccumulatedChars,
+                text: delta,
+              });
+              this.liveBlockChars += delta.length;
+            }
           }
         }
       }
@@ -671,7 +709,10 @@ export class UsageCollector {
     this.liveOutputTokens = 0;
     this.liveAccumulatedText = "";
     this.liveThinkingText = "";
+    this.liveToolCallText = "";
     this.liveChunks = [];
+    this.liveBlocks = [];
+    this.liveBlockChars = 0;
     this.chunkSeq = 0;
     this.lastActiveSyncAt = 0;
     this.lastPhase = "idle";
